@@ -1,9 +1,16 @@
 # Execution Guard Action
 
-**Reference Implementation — Execution Contract Engine**
-
-> This is a **Reference Implementation** demonstrating the Execution Contract concept.
-> The Production Execution Contract Kernel is maintained as a separate private module.
+> **REFERENCE IMPLEMENTATION DECLARATION**
+>
+> This repository is a **Reference Implementation** of the Execution Contract pattern.
+> It is fixed to the `v0.x` reference line and does not contain the Production Execution Contract Kernel.
+>
+> The Production Kernel — which includes environment binding, extended replay prevention,
+> and secure token storage — is maintained as a separate private module.
+> This repository demonstrates structure and interface; the private kernel holds enforcement.
+>
+> **Public and private are connected only through the `ITokenStore` interface contract.
+> No direct dependency between repositories.**
 
 **Deterministic execution boundary. Deny-by-default. No shell parsing.**
 
@@ -29,9 +36,9 @@ If a command is not explicitly listed in policy, it does not run. The decision i
 |--|--|--|
 | **Purpose** | Concept demonstration, PoC | Production enforcement |
 | **Env fingerprint** | 3 fields (os, node, policy) | 9 fields — full runner identity |
-| **Replay key** | `token_id` only | `proposal_hash \| env_fp` composite |
-| **Token store** | In-memory (MemoryTokenStore) | File/Secure (abstracted ITokenStore) |
-| **Tests** | T1–T7 concept, A–G adapter | T1–T10 + env mismatch (T8/T9/T10) |
+| **Replay key** | `token_id` only | Extended replay binding (private) |
+| **Token store** | In-memory (MemoryTokenStore) | Persistent/secure (private) |
+| **Tests** | T1–T7 concept, A–G adapter | Extended test suite (private) |
 | **Versioning** | `v0.x` reference | `v1.x` kernel |
 
 Production kernel: `Nick-heo-eg/echo-execution-kernel` (private)
@@ -189,6 +196,26 @@ dd if=/dev/zero of=/dev/sda    →  DECISION: STOP   ❌
 
 ---
 
+## Semantic Guardrail vs Structural Execution Contract
+
+These are architecturally distinct approaches to execution safety.
+
+| | Semantic Guardrail | Structural Execution Contract |
+|--|--|--|
+| **Decision basis** | Intent inference from content | Identity verification at boundary |
+| **When** | At model output time | Before command reaches runtime |
+| **Bypass risk** | Prompt injection, paraphrase | Command never reaches runtime without contract |
+| **Default** | Allow unless flagged | DENY unless explicitly permitted |
+| **Audit** | Output classification | Cryptographic execution token |
+
+A semantic guardrail asks: "does this look safe?"
+
+A structural execution contract asks: "does this command have authority to execute?"
+
+These are not alternatives. They operate at different points in the execution lifecycle and address different threat surfaces. This layer operates at the structural contract level — command identity is evaluated against policy before execution begins.
+
+---
+
 ## FAQ
 
 **Why not replace shell with typed tools?**
@@ -260,7 +287,7 @@ Authority tokens are bound to execution environment. Environment change = differ
 
 **Reference** (this repo): `node_version + runner_os + policy_hash`
 
-**Production kernel**: 9-field runner identity — `github_repository`, `github_sha`, `github_workflow`, `workflow_run_id`, `runner_os`, `runner_arch`, `node_version`, `guard_version`, `policy_hash`
+**Production kernel**: extended runner-identity binding — see `echo-execution-kernel` (private).
 
 ### Roadmap
 

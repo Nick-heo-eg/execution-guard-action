@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.7.1] — 2026-02-18
+
+### Security — Private field scrub + public repo hardening
+
+- **README top declaration** — added Reference Implementation blockquote at the very top;
+  states that the production kernel is in a separate private module; clarifies that public
+  and private are connected only through `ITokenStore` interface contract.
+
+- **Source file comment scrub** — removed private implementation details from public source
+  comments: field names, key formats, and timing windows that could expose internal
+  protection logic were replaced with generic language pointing to `echo-execution-kernel` (private).
+  Files affected: `src/environment_fingerprint.ts`, `src/token_registry.ts`,
+  `src/execution_kernel.ts`.
+
+- **ITokenStore frozen** — `src/interfaces/token_store.ts` now carries a `FROZEN INTERFACE — v1.0`
+  declaration. Any change to method signatures requires a major version bump.
+  Private backend names removed from interface comments.
+
+- **Private dependency removed** — `execution-runtime-core: file:../execution-runtime-core`
+  removed from `package.json`. Policy evaluation logic (`src/core/evaluate.ts`) is now
+  inlined locally. Repository is fully self-contained; external `npm install && npm run build`
+  now works without any sibling packages.
+
+- **README new section** — "Semantic Guardrail vs Structural Execution Contract" comparison
+  table added. Describes the difference between intent-based output classification and
+  boundary-based execution authority without exposing internal logic.
+
+- **CHANGELOG v0.6.1 redacted** — private field names and internal function signatures
+  removed from changelog history.
+
+### Tests
+
+- T1–T7 7/7 pass, A–G adapter 7/7 pass, spawn guard pass.
+- Build: 2788kB, no private imports.
+
+---
+
 ## [0.7.0-reference] - 2026-02-18
 
 ### Architecture — Public/Private Kernel Split
@@ -49,16 +86,15 @@ The production Execution Contract Kernel has been extracted to `Nick-heo-eg/echo
 
 ### Added — Runner-Bound Authority Tokens + Composite Replay Prevention
 
-- **Environment fingerprint hardened** — `src/environment_fingerprint.ts` now hashes 9 runner-identity fields: `github_repository`, `github_sha`, `github_workflow`, `guard_version`, `node_version`, `policy_hash`, `runner_arch` (via `RUNNER_ARCH`), `runner_os`, `workflow_run_id`. Keys sorted ascending for determinism. A token issued on runner A cannot be verified on runner B.
-- **Composite replay key** — `src/token_registry.ts` changed from `token_id`-only replay key to composite key `proposal_hash|environment_fingerprint`. Same (proposal, environment) pair executes exactly once per 60-second `timestamp_floor` window regardless of fresh token issuance.
-- **`isExecutionUsed(proposalHash, envFp)`** — replaces `isTokenUsed(tokenId)`. Semantic shift: from "was this token used" to "did this (proposal, environment) execute". `markExecutionUsed(tokenId, proposalHash, envFp, auditEntry)` persists composite key to NDJSON for cross-run audit reconstruction.
-- **`currentEnvFingerprint` computed once** in `execution_kernel.ts` before step 3 — reused in step 3 (replay composite key) and step 6 (env binding). No double hash.
-- **T8/T9/T10 tests added** — `tests/runtime_enforced.spec.ts` now covers: T8 workflow identity mismatch (`ENV_FINGERPRINT_MISMATCH`), T9 commit SHA mismatch (`ENV_FINGERPRINT_MISMATCH`), T10 stable environment baseline (ALLOW, exit 0). Each executing test uses unique args to avoid composite-key collision within 60s window.
-- **Test C updated** — `tests/openclaw_integration.spec.ts` test C now asserts correct hardened behavior: second identical proposal in same env → `verdict: STOP`, `reason_code: TOKEN_REPLAYED`, `executed: false`. (Old behavior was a gap — composite key now closes it.)
+- **Environment fingerprint hardened** — extended runner-identity binding. A token issued on runner A cannot be verified on runner B.
+- **Replay prevention strengthened** — additional binding on replay key; same (proposal, environment) pair executes exactly once per time window.
+- **Kernel step 3 updated** — semantic shift from token-level to execution-level replay prevention.
+- **T8/T9/T10 tests added** — `tests/runtime_enforced.spec.ts` now covers runner identity mismatch and stable environment baseline.
+- **Test C updated** — `tests/openclaw_integration.spec.ts` test C now asserts correct hardened replay behavior.
 
 ### Changed
-- `src/execution_kernel.ts`: Import updated (`isExecutionUsed`, `markExecutionUsed`). `markExecutionUsed` called with `expires_at` in audit entry (replaces `args`).
-- `src/token_registry.ts`: `usedExecutions` Set replaces `usedTokenIds` Set. `initRegistry()` rebuilds composite keys from records with `proposal_hash` + `env_fp` fields; pre-v0.6.1 records silently skipped.
+- `src/execution_kernel.ts`: Replay check updated to extended binding. Audit entry updated.
+- `src/token_registry.ts`: Extended replay Set + NDJSON reconstruction.
 - `tests/runtime_enforced.spec.ts`: `freshAllowToken(args: string[])` now requires explicit args — removes implicit global constant dependency.
 
 ### DoD Verification (local, v0.6.1)

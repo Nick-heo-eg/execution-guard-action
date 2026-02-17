@@ -138,7 +138,7 @@ export async function executeWithAuthority(
   }
 
   // --- Step 3: Replay prevention (token_id — reference implementation) ---
-  // Production kernel: composite key (proposal_hash|env_fp) per 60s window.
+  // Production kernel: extended replay prevention — see echo-execution-kernel.
   if (isTokenUsed(token.token_id)) {
     const err = new ExecutionDeniedError(
       'TOKEN_REPLAYED',
@@ -207,7 +207,7 @@ export async function executeWithAuthority(
 
   // --- All 7 steps passed ---
   // Mark token used BEFORE spawn (replay blocked even on hang)
-  // Reference: token_id only. Production kernel: composite key (proposal_hash|env_fp).
+  // Reference: token_id only. Production kernel: extended — see private kernel.
   markTokenUsed(token.token_id, {
     audit_ref: token.audit_ref,
     policy_hash: token.policy_hash,

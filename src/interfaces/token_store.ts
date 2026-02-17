@@ -1,10 +1,14 @@
 /**
  * ITokenStore — Interface contract for token storage backends.
  *
+ * FROZEN INTERFACE — v1.0
+ * Any change to method signatures requires a major version bump.
+ * Public and private implementations must satisfy this exact contract.
+ * Do NOT add methods without incrementing the interface version.
+ *
  * Implementations:
  *   - MemoryTokenStore (src/stores/memory_store.ts) — reference PoC
- *   - FileTokenStore — private kernel (path strategy abstracted)
- *   - SecureTokenStore — private kernel (KMS-backed, future)
+ *   - Additional backends available in private kernel
  *
  * The store is NOT the execution authority.
  * Storing a token does NOT grant execution.

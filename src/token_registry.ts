@@ -4,8 +4,7 @@
  * REFERENCE ONLY: Demonstrates replay prevention concept.
  * Uses token_id-only replay key (simple in-memory Set).
  *
- * Production kernel: composite key (proposal_hash + environment_fingerprint)
- * — same (proposal, environment) pair executes exactly once per 60s window.
+ * Production kernel: extended replay prevention with additional binding.
  * See echo-execution-kernel (private).
  *
  * Fail-closed: If registry cannot be read, assume clean state.
@@ -25,7 +24,7 @@ export function initRegistry(): void {
 /**
  * Returns true if this token_id has already been used.
  * Reference: token_id-only check.
- * Production kernel: composite key (proposal_hash|env_fp).
+ * Production kernel: extended replay key — see private kernel.
  */
 export function isTokenUsed(tokenId: string): boolean {
   return usedTokenIds.has(tokenId);

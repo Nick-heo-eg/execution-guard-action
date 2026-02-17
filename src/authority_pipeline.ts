@@ -20,7 +20,7 @@
  */
 
 import { generateKeyPairSync, sign as cryptoSign } from 'crypto';
-import { evaluate } from 'execution-runtime-core/src/core/evaluate.js';
+import { evaluate } from './core/evaluate.js';
 import { buildCanonicalProposal, canonicalHash, hashPolicyFile, type CanonicalProposal } from './canonical_proposal.js';
 import { buildEnvironmentFingerprint } from './environment_fingerprint.js';
 import { appendAuditRecord } from './token_registry.js';

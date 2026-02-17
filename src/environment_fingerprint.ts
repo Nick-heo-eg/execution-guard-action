@@ -4,9 +4,8 @@
  * REFERENCE ONLY: Demonstrates the concept of environment binding.
  * Uses 3 stable fields sufficient for local/PoC use.
  *
- * Production kernel: 9-field runner-identity hash including
- * GITHUB_SHA, GITHUB_WORKFLOW, GITHUB_RUN_ID, RUNNER_ARCH, RUNNER_OS,
- * GITHUB_REPOSITORY, and more. See echo-execution-kernel (private).
+ * Production kernel: extended runner-identity binding.
+ * See echo-execution-kernel (private).
  *
  * Concept: A token issued in environment A cannot be verified in environment B.
  * Environment change = different fingerprint = ENV_FINGERPRINT_MISMATCH at step 6.
