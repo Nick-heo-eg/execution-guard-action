@@ -48,16 +48,22 @@ export interface PipelineResult {
 /**
  * Run the full authority pipeline.
  *
+ * @param allowWithAudit PERMISSIVE only: on policy miss, issue an ALLOW token
+ *   (not HOLD) with scope.constraints.audited_permit='true'. spawn still goes
+ *   through all 7 kernel verification steps. Ignored in STRICT mode.
+ *   Admin scope commands are never auto-permitted even with this flag.
+ *
  * Never throws — fail-closed: returns STOP on any internal error.
  */
 export async function runAuthorityPipeline(
   command: string,
   args: string[],
   policyPath: string,
-  mode: GateMode = GateMode.STRICT
+  mode: GateMode = GateMode.STRICT,
+  allowWithAudit: boolean = false
 ): Promise<PipelineResult> {
   try {
-    return await _pipeline(command, args, policyPath, mode);
+    return await _pipeline(command, args, policyPath, mode, allowWithAudit);
   } catch (err) {
     const safeMsg = err instanceof Error ? err.message : String(err);
     console.error(`[PIPELINE ERROR] ${safeMsg}`);
@@ -84,7 +90,8 @@ async function _pipeline(
   command: string,
   args: string[],
   policyPath: string,
-  mode: GateMode
+  mode: GateMode,
+  allowWithAudit: boolean
 ): Promise<PipelineResult> {
   // Step 1: Build canonical proposal
   const proposal = buildCanonicalProposal(command, args, policyPath);
@@ -104,6 +111,12 @@ async function _pipeline(
   let pipelineDecision: PipelineDecision;
 
   if (coreAllowed) {
+    tokenDecision = 'ALLOW';
+    pipelineDecision = 'ALLOW';
+  } else if (mode === GateMode.PERMISSIVE && allowWithAudit) {
+    // PERMISSIVE + allow_with_audit: policy miss → ALLOW token with audit flag
+    // spawn still goes through all 7 kernel steps — no verification bypass.
+    // audited_permit=true marks this as policy-miss execution in the audit trail.
     tokenDecision = 'ALLOW';
     pipelineDecision = 'ALLOW';
   } else if (mode === GateMode.PERMISSIVE) {
@@ -147,8 +160,11 @@ async function _pipeline(
     constraints: {
       policy_version: policyHash,
       gate_mode: mode,
-      guard_version: GUARD_VERSION
-    }
+      guard_version: GUARD_VERSION,
+      // audited_permit marks this token as allowed on policy miss (PERMISSIVE+allow_with_audit)
+      // The kernel runs all 7 steps regardless — this is for audit trail classification only.
+      ...(allowWithAudit && !coreAllowed ? { audited_permit: 'true' } : {})
+    } as TokenScope['constraints'] & Record<string, string>
   };
 
   const tokenPayload: Omit<VerifiedToken, 'issuer_signature' | 'public_key_hex'> = {

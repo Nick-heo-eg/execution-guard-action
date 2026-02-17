@@ -14,6 +14,7 @@ KERNEL_FILE="src/execution_kernel.ts"
 KERNEL_PATTERN="execution_kernel"
 
 echo "=== CI Guard: spawn/exec single-site enforcement ==="
+echo "    Scope: src/**/*.ts (includes adapters/openclaw/ — no exceptions)"
 echo ""
 
 violations=()

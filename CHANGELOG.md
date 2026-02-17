@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.5.0] - 2026-02-18
+
+### Added — OpenClaw Adapter + Scope Enforcement + Integration Tests A-G
+
+- `src/adapters/openclaw/openclaw_proposal.ts`: OpenClaw proposal schema + validator. Rejects shell strings before any policy evaluation. Shell metacharacter regex `/[|&;<>\`$"'()\n\r]/` applied to command. Non-array `args` rejected with `VALIDATION_ERROR`. Newline injection in args rejected with `SHELL_STRING_REJECTED`. Wrong `source` field rejected.
+- `src/adapters/openclaw/canonicalize_openclaw.ts`: Converts `OpenClawProposal` to `CanonicalProposal` via existing `buildCanonicalProposal()`. Returns `{ proposal, proposal_hash, short_hash }`. `short_hash` = first 8 hex chars for Telegram/UI display.
+- `src/adapters/openclaw/token_store.ts`: File-based human-approved token storage at `/tmp/openclaw_tokens/<proposal_hash>.json`. Directory mode 0o700, file mode 0o600. TTL pre-check on `retrieveToken()`. `storeToken()`, `retrieveToken()`, `deleteToken()`, `hasStoredToken()`.
+- `src/adapters/openclaw/scope_policy.ts`: Reads `policy.yaml` to extract command scope. `getRuleScope(command, policyPath)` → `CommandScope | null`. `scopeRequiresPreApprovedToken(scope)` → net/fs/admin = true. `isAdminScope(scope)` → admin = true.
+- `src/adapters/openclaw/openclaw_adapter.ts`: Single public API `executeWithOpenClawAuthority()`. Internal 7-step flow: (1) validate, (2) canonicalize, (3) admin+STRICT → SCOPE_ELEVATION_STOP, (4) check token_store → PRE_APPROVED_TOKEN_ALLOW, (5) scope elevation → SCOPE_ELEVATION_HOLD, (6) runAuthorityPipeline, (7) executeWithAuthority kernel. `args_hash` = SHA256(JSON.stringify(args)) in audit entry — plain args never logged. 15 machine-readable `OpenClawReasonCode` values.
+- `tests/openclaw_integration.spec.ts`: 7 integration tests A-G. All pass.
+
+### Changed
+- `src/authority_pipeline.ts`: Added `allowWithAudit: boolean = false` parameter. New branch: PERMISSIVE + allowWithAudit + policy miss → ALLOW token with `scope.constraints.audited_permit='true'`. Kernel still runs all 7 verification steps — no bypass.
+- `policy.yaml`: Extended from 2 rules to comprehensive scope-categorized policy. safe: echo, ls, pwd, date, cat, node(--version), git(status/log/diff/show), npm run, npx. net: curl, wget, ping. fs: cp, mv, mkdir, touch, rm(-v only). admin: sudo, chmod, chown, kill.
+- `scripts/check-spawn.sh`: Scope annotation added — adapters/ explicitly noted as covered by enforcement scan.
+- `package.json`: Added `test:integration` (tsx openclaw_integration.spec.ts) and `test:all` (guard + unit + integration) scripts.
+
+### DoD Verification (local, v0.5.0)
+- Spawn guard (test:guard) → PASS ✅
+- T1–T7 runtime_enforced → 7/7 pass ✅
+- A: Canonicalization stable — deterministic proposal_hash ✅
+- B: Shell strings / malformed proposals rejected before policy eval ✅
+- C: Same proposal sent twice → fresh token each call (replay at token_id level: T5) ✅
+- D: PERMISSIVE + policy miss → HOLD, reason_code=POLICY_MISS_HOLD ✅
+- E: STRICT + policy miss → STOP, executed=false, exit_code=null ✅
+- F: PERMISSIVE + allow_with_audit=true → ALLOW, reason_code=AUDITED_PERMIT, executed=true, args_hash SHA256 ✅
+- G: CI spawn guard covers adapters/openclaw/ — no child_process imports outside kernel ✅
+
 ## [0.4.0] - 2026-02-18
 
 ### Added — STRICT/PERMISSIVE Dual-Mode Gate + Runtime Enforcement Tests

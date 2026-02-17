@@ -25683,11 +25683,16 @@ const TOKEN_TTL_MS = 5 * 60 * 1000; // 5 minutes — single-run window
 /**
  * Run the full authority pipeline.
  *
+ * @param allowWithAudit PERMISSIVE only: on policy miss, issue an ALLOW token
+ *   (not HOLD) with scope.constraints.audited_permit='true'. spawn still goes
+ *   through all 7 kernel verification steps. Ignored in STRICT mode.
+ *   Admin scope commands are never auto-permitted even with this flag.
+ *
  * Never throws — fail-closed: returns STOP on any internal error.
  */
-async function runAuthorityPipeline(command, args, policyPath, mode = mode_js_1.GateMode.STRICT) {
+async function runAuthorityPipeline(command, args, policyPath, mode = mode_js_1.GateMode.STRICT, allowWithAudit = false) {
     try {
-        return await _pipeline(command, args, policyPath, mode);
+        return await _pipeline(command, args, policyPath, mode, allowWithAudit);
     }
     catch (err) {
         const safeMsg = err instanceof Error ? err.message : String(err);
@@ -25710,7 +25715,7 @@ async function runAuthorityPipeline(command, args, policyPath, mode = mode_js_1.
         };
     }
 }
-async function _pipeline(command, args, policyPath, mode) {
+async function _pipeline(command, args, policyPath, mode, allowWithAudit) {
     // Step 1: Build canonical proposal
     const proposal = (0, canonical_proposal_js_1.buildCanonicalProposal)(command, args, policyPath);
     const proposalHash = (0, canonical_proposal_js_1.canonicalHash)(proposal);
@@ -25724,6 +25729,13 @@ async function _pipeline(command, args, policyPath, mode) {
     let tokenDecision;
     let pipelineDecision;
     if (coreAllowed) {
+        tokenDecision = 'ALLOW';
+        pipelineDecision = 'ALLOW';
+    }
+    else if (mode === mode_js_1.GateMode.PERMISSIVE && allowWithAudit) {
+        // PERMISSIVE + allow_with_audit: policy miss → ALLOW token with audit flag
+        // spawn still goes through all 7 kernel steps — no verification bypass.
+        // audited_permit=true marks this as policy-miss execution in the audit trail.
         tokenDecision = 'ALLOW';
         pipelineDecision = 'ALLOW';
     }
@@ -25764,7 +25776,10 @@ async function _pipeline(command, args, policyPath, mode) {
         constraints: {
             policy_version: policyHash,
             gate_mode: mode,
-            guard_version: GUARD_VERSION
+            guard_version: GUARD_VERSION,
+            // audited_permit marks this token as allowed on policy miss (PERMISSIVE+allow_with_audit)
+            // The kernel runs all 7 steps regardless — this is for audit trail classification only.
+            ...(allowWithAudit && !coreAllowed ? { audited_permit: 'true' } : {})
         }
     };
     const tokenPayload = {

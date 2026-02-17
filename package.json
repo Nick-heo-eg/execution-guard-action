@@ -9,6 +9,8 @@
     "build": "ncc build src/index.ts -o dist --source-map --license licenses.txt",
     "build:clean": "rm -rf dist && npm run build",
     "test": "npx tsx --test tests/runtime_enforced.spec.ts",
+    "test:integration": "npx tsx --test tests/openclaw_integration.spec.ts",
+    "test:all": "npm run test:guard && npm run test && npm run test:integration",
     "test:guard": "bash scripts/check-spawn.sh",
     "prepublishOnly": "npm run build"
   },

@@ -1,11 +1,22 @@
-# Execution Guard — Example Policy
+# Execution Guard Policy
+# default: DENY — explicit allowlist only. No rule match = no execution.
 #
-# Default: DENY all commands not listed below.
-# Add rules for commands you explicitly trust.
+# scope categories:
+#   safe  — auto-execute in STRICT and PERMISSIVE (no human token needed)
+#   net   — network access; requires human-approved token (scope elevation)
+#   fs    — filesystem mutation; requires human-approved token
+#   admin — elevated/destructive; always requires human-approved token
+#
+# command matching: exact argv[0] match only. No glob. No alias. No semantic eval.
+# args matching: '*' matches any single argument value.
+#
+# INVARIANT: args are not shell-parsed. Pipes, redirects, etc. are rejected
+#            at the adapter layer before policy eval.
 
 default: DENY
 
 rules:
+  # ── safe scope ────────────────────────────────────────────────────────────
   - command: echo
     args: ['*']
     scope: safe
@@ -16,11 +27,113 @@ rules:
     scope: safe
     description: Allow ls with any arguments
 
-  # Add your own rules:
-  # - command: npm
-  #   args: ['run', 'build']
-  #   scope: build
-  #
-  # - command: python3
-  #   args: ['scripts/deploy.py']
-  #   scope: deploy
+  - command: pwd
+    scope: safe
+    description: Allow pwd (no args required)
+
+  - command: date
+    scope: safe
+    description: Allow date
+
+  - command: cat
+    args: ['*']
+    scope: safe
+    description: Allow cat on any file
+
+  - command: node
+    args: ['--version']
+    scope: safe
+    description: Allow node --version only
+
+  - command: git
+    args: ['status', '*']
+    scope: safe
+    description: Allow git status
+
+  - command: git
+    args: ['log', '*']
+    scope: safe
+    description: Allow git log
+
+  - command: git
+    args: ['diff', '*']
+    scope: safe
+    description: Allow git diff
+
+  - command: git
+    args: ['show', '*']
+    scope: safe
+    description: Allow git show
+
+  - command: npm
+    args: ['run', '*']
+    scope: safe
+    description: Allow npm run <script>
+
+  - command: npx
+    args: ['*']
+    scope: safe
+    description: Allow npx
+
+  # ── net scope (requires human-approved token) ─────────────────────────────
+  - command: curl
+    args: ['*']
+    scope: net
+    description: curl — network access, requires token approval
+
+  - command: wget
+    args: ['*']
+    scope: net
+    description: wget — network access, requires token approval
+
+  - command: ping
+    args: ['*']
+    scope: net
+    description: ping — network access, requires token approval
+
+  # ── fs scope (requires human-approved token) ──────────────────────────────
+  - command: cp
+    args: ['*']
+    scope: fs
+    description: cp — filesystem write, requires token approval
+
+  - command: mv
+    args: ['*']
+    scope: fs
+    description: mv — filesystem mutation, requires token approval
+
+  - command: mkdir
+    args: ['*']
+    scope: fs
+    description: mkdir — filesystem mutation, requires token approval
+
+  - command: touch
+    args: ['*']
+    scope: fs
+    description: touch — filesystem mutation, requires token approval
+
+  - command: rm
+    args: ['-v', '*']
+    scope: fs
+    description: rm -v (verbose only, no -rf) — requires token approval
+
+  # ── admin scope (always requires human-approved token, STRICT=hard block) ─
+  - command: sudo
+    args: ['*']
+    scope: admin
+    description: sudo — requires human-approved token, blocked in STRICT auto-flow
+
+  - command: chmod
+    args: ['*']
+    scope: admin
+    description: chmod — requires human-approved token
+
+  - command: chown
+    args: ['*']
+    scope: admin
+    description: chown — requires human-approved token
+
+  - command: kill
+    args: ['*']
+    scope: admin
+    description: kill — requires human-approved token
