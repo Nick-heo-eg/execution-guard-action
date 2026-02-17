@@ -23,9 +23,15 @@ outputs:
   verdict:
     description: 'ALLOW, STOP, or HOLD'
   proposal_hash:
-    description: 'SHA256 hash of the execution proposal'
+    description: 'SHA256 hash of the canonical execution proposal'
   reason:
-    description: 'Reason for the verdict'
+    description: 'Policy rule ID for this verdict (not semantic inference)'
+  token_id:
+    description: 'UUID of the authority token issued for this execution (empty on STOP)'
+  audit_ref:
+    description: 'UUID cross-reference for the audit log entry (empty on STOP)'
+  environment_fingerprint:
+    description: 'SHA256 of the execution environment at decision time (empty on STOP)'
 
 runs:
   using: 'node20'

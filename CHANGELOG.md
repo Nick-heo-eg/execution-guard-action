@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0] - 2026-02-18
+
+### Added — Authority Token Layer (Runtime-Enforced)
+- `src/canonical_proposal.ts`: Stable SHA256 hash of command+args+policy_hash+timestamp. Binds token to exact execution request.
+- `src/environment_fingerprint.ts`: SHA256 of runner_os+arch+node_version+repo_sha+workflow_run_id+policy_hash. Prevents cross-environment token replay.
+- `src/token_registry.ts`: Append-only NDJSON audit log (`.execution_audit/`). In-memory Set for replay prevention within a run.
+- `src/canonical_stringify.ts`: Deterministic sorted-key JSON serialization shared by proposal hash and signature verification.
+- `src/authority_pipeline.ts`: Orchestrates evaluate() → ephemeral ED25519 key generation → token issuance → returns VerifiedToken.
+- `src/execution_kernel.ts`: **THE ONLY authorized spawn() call site.** Verifies 6 invariants before spawn: TTL, decision=ALLOW, no replay, proposal_hash match, env_fingerprint match, ED25519 signature valid.
+- `scripts/check-spawn.sh`: CI guard — fails build if spawn/exec is found outside execution_kernel.ts.
+
+### Changed
+- `src/index.ts`: Removed direct spawn(). Now routes through `runAuthorityPipeline()` → `executeWithAuthority()`.
+- `action.yml`: Added outputs: `token_id`, `audit_ref`, `environment_fingerprint`.
+
+### DoD Verification (local)
+- ALLOW: token issued → kernel verified → `hello from execution-guard` executed → exit 0
+- STOP: `rm -rf --no-preserve-root /` blocked → no token issued → exit 1
+- Replay: token marked used before spawn — blocked on re-use
+- Policy/env change: fingerprint mismatch → STOP before spawn
+
+---
+
 ## [0.2.0] - 2026-02-18
 
 ### Changed

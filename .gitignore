@@ -4,3 +4,6 @@ licenses.txt
 
 # Keep dist/ committed (required for GitHub Actions)
 !dist/
+
+# Runtime audit logs — generated per-run, not committed
+.execution_audit/

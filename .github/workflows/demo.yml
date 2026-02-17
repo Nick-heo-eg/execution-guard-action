@@ -6,6 +6,27 @@ on:
   workflow_dispatch:
 
 jobs:
+  deny-rm-rf:
+    name: "STOP: rm -rf blocked"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard (expect STOP)
+        id: guard
+        uses: ./
+        continue-on-error: true
+        with:
+          command: 'rm -rf --no-preserve-root /'
+          policy_path: './policy.yaml'
+
+      - name: Assert STOP
+        run: |
+          echo "DECISION:      ${{ steps.guard.outputs.verdict }}"
+          echo "HASH:          ${{ steps.guard.outputs.proposal_hash }}"
+          echo "REASON:        ${{ steps.guard.outputs.reason }}"
+          [ "${{ steps.guard.outputs.verdict }}" = "STOP" ] && echo "❌ Blocked as expected" || (echo "Expected STOP" && exit 1)
+
   deny-curl-pipe:
     name: "STOP: curl pipe blocked"
     runs-on: ubuntu-latest
@@ -65,4 +86,5 @@ jobs:
         run: |
           echo "DECISION:      ${{ steps.guard.outputs.verdict }}"
           echo "HASH:          ${{ steps.guard.outputs.proposal_hash }}"
+          echo "REASON:        ${{ steps.guard.outputs.reason }}"
           [ "${{ steps.guard.outputs.verdict }}" = "ALLOW" ] && echo "✅ Permitted as expected" || (echo "Expected ALLOW" && exit 1)
