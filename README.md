@@ -7,7 +7,7 @@ This GitHub Action blocks any shell command that is not explicitly allowed by po
 ## 60-Second Setup
 
 ```yaml
-- uses: Nick-heo-eg/execution-guard-action@v0.1.0
+- uses: Nick-heo-eg/execution-guard-action@v0.1.1
   with:
     policy_path: policy.yaml
 ```
