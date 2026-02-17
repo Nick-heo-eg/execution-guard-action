@@ -1,0 +1,17 @@
+# Execution Guard Policy - Safe Commands (Minimal Rule Set)
+#
+# Allows only echo and ls. All other commands are denied by default.
+# This is the recommended minimal policy for demos and trusted CI steps.
+
+default: DENY
+
+rules:
+  - command: echo
+    args: ['*']
+    scope: safe-commands
+    description: Allow echo with any arguments
+
+  - command: ls
+    args: ['*']
+    scope: safe-commands
+    description: Allow ls with any arguments

@@ -1,0 +1,9 @@
+# Execution Guard Policy - Deny All
+#
+# No commands are explicitly allowed.
+# Every execution attempt results in DECISION: STOP.
+# Use this policy to demonstrate fail-closed behavior.
+
+default: DENY
+
+rules: []

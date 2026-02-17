@@ -1,0 +1,83 @@
+name: Execution Guard Demo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  demo-deny:
+    name: "Demo: STOP (curl blocked)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Guard: curl (NOT in policy) → DECISION: STOP"
+        id: guard_deny
+        uses: ./
+        continue-on-error: true
+        with:
+          command: 'curl https://example.com'
+          policy_path: './policies/safe-commands.yaml'
+
+      - name: Verify STOP verdict
+        run: |
+          echo "Verdict: ${{ steps.guard_deny.outputs.verdict }}"
+          echo "Hash:    ${{ steps.guard_deny.outputs.proposal_hash }}"
+          echo "Reason:  ${{ steps.guard_deny.outputs.reason }}"
+          if [ "${{ steps.guard_deny.outputs.verdict }}" = "STOP" ]; then
+            echo "✅ STOP verdict confirmed — curl was correctly blocked"
+          else
+            echo "❌ Expected STOP but got ${{ steps.guard_deny.outputs.verdict }}"
+            exit 1
+          fi
+
+  demo-allow:
+    name: "Demo: ALLOW (echo permitted)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Guard: echo (in policy) → DECISION: ALLOW"
+        id: guard_allow
+        uses: ./
+        with:
+          command: 'echo hello from execution-guard'
+          policy_path: './policies/safe-commands.yaml'
+
+      - name: Verify ALLOW verdict
+        run: |
+          echo "Verdict: ${{ steps.guard_allow.outputs.verdict }}"
+          echo "Hash:    ${{ steps.guard_allow.outputs.proposal_hash }}"
+          echo "Reason:  ${{ steps.guard_allow.outputs.reason }}"
+          if [ "${{ steps.guard_allow.outputs.verdict }}" = "ALLOW" ]; then
+            echo "✅ ALLOW verdict confirmed — echo was correctly permitted"
+          else
+            echo "❌ Expected ALLOW but got ${{ steps.guard_allow.outputs.verdict }}"
+            exit 1
+          fi
+
+  demo-rm-blocked:
+    name: "Demo: STOP (rm -rf blocked)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Guard: rm -rf (NOT in policy) → DECISION: STOP"
+        id: guard_rm
+        uses: ./
+        continue-on-error: true
+        with:
+          command: 'rm -rf /'
+          policy_path: './policies/safe-commands.yaml'
+
+      - name: Verify STOP verdict for rm
+        run: |
+          echo "Verdict: ${{ steps.guard_rm.outputs.verdict }}"
+          echo "Hash:    ${{ steps.guard_rm.outputs.proposal_hash }}"
+          if [ "${{ steps.guard_rm.outputs.verdict }}" = "STOP" ]; then
+            echo "✅ STOP verdict confirmed — rm -rf / was correctly blocked"
+          else
+            echo "❌ Expected STOP but got ${{ steps.guard_rm.outputs.verdict }}"
+            exit 1
+          fi

@@ -1,0 +1,26 @@
+{
+  "name": "execution-guard-action",
+  "version": "0.1.0",
+  "description": "Deny-by-default execution layer for GitHub Actions built on Execution Boundary architecture",
+  "private": false,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build src/index.ts -o dist --source-map --license licenses.txt",
+    "build:clean": "rm -rf dist && npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@actions/core": "^1.10.1",
+    "execution-runtime-core": "file:../execution-runtime-core",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.6",
+    "@vercel/ncc": "^0.38.1",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

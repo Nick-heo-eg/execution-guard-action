@@ -1,0 +1,27 @@
+name: 'Execution Guard'
+description: 'Deny-by-default execution layer for GitHub Actions built on Execution Boundary architecture.'
+
+inputs:
+  command:
+    description: 'Command to execute (e.g. "echo hello" or "curl https://example.com")'
+    required: true
+  policy_path:
+    description: 'Path to policy YAML file defining allowed commands'
+    required: false
+    default: './policy.yaml'
+  fail_on_hold:
+    description: 'Exit 1 on HOLD verdict (true) or emit warning and exit 0 (false)'
+    required: false
+    default: 'true'
+
+outputs:
+  verdict:
+    description: 'Execution verdict: ALLOW, STOP, or HOLD'
+  proposal_hash:
+    description: 'SHA256 hash of the execution proposal (for audit trail)'
+  reason:
+    description: 'Human-readable reason for the verdict'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
