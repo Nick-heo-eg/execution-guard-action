@@ -26000,13 +26000,17 @@ function parseModeFromEnv() {
 "use strict";
 
 /**
- * Environment Fingerprint — SHA256 of the execution environment.
+ * Environment Fingerprint — Reference Implementation
  *
- * A token issued on runner A cannot be replayed on runner B.
- * Environment mismatch = STOP, even if token is structurally valid.
+ * REFERENCE ONLY: Demonstrates the concept of environment binding.
+ * Uses 3 stable fields sufficient for local/PoC use.
  *
- * Minimal required fields for GitHub Actions context.
- * Falls back to process-level values for local/non-CI use.
+ * Production kernel: 9-field runner-identity hash including
+ * GITHUB_SHA, GITHUB_WORKFLOW, GITHUB_RUN_ID, RUNNER_ARCH, RUNNER_OS,
+ * GITHUB_REPOSITORY, and more. See echo-execution-kernel (private).
+ *
+ * Concept: A token issued in environment A cannot be verified in environment B.
+ * Environment change = different fingerprint = ENV_FINGERPRINT_MISMATCH at step 6.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.buildEnvironmentComponents = buildEnvironmentComponents;
@@ -26015,12 +26019,8 @@ const crypto_1 = __nccwpck_require__(6982);
 const canonical_proposal_js_1 = __nccwpck_require__(3258);
 function buildEnvironmentComponents(policyPath) {
     return {
-        runner_os: process.env['RUNNER_OS'] ?? process.platform,
-        arch: process.arch,
         node_version: process.version,
-        repo_sha: process.env['GITHUB_SHA'] ?? 'local',
-        workflow_run_id: process.env['GITHUB_RUN_ID'] ?? 'local',
-        guard_version: process.env['GUARD_VERSION'] ?? '0.3.0',
+        runner_os: process.env['RUNNER_OS'] ?? process.platform,
         policy_hash: (0, canonical_proposal_js_1.hashPolicyFile)(policyPath)
     };
 }
@@ -26075,6 +26075,10 @@ exports.ExecutionDeniedError = ExecutionDeniedError;
 /**
  * Execution Kernel — THE ONLY authorized spawn() call site.
  *
+ * REFERENCE IMPLEMENTATION: Demonstrates the Execution Contract concept.
+ * Production kernel: echo-execution-kernel (private) — runner-bound
+ * authority tokens, composite replay key, 9-field env fingerprint.
+ *
  * SECURITY CONTRACT:
  *   spawn() MUST NOT be called anywhere else in this codebase.
  *   A verified authority token is required to reach spawn.
@@ -26083,10 +26087,10 @@ exports.ExecutionDeniedError = ExecutionDeniedError;
  * Verification chain (7 steps, fail-closed):
  *   1. Token not expired (TTL)
  *   2. decision === 'ALLOW' (blocks HOLD and any other decision)
- *   3. token_id not replayed (in-memory + NDJSON)
+ *   3. token_id not replayed (in-memory only — reference implementation)
  *   4. proposal_hash matches re-computed canonical hash
  *   5. policy_hash matches current policy content hash
- *   6. environment_fingerprint matches current runtime
+ *   6. environment_fingerprint matches current runtime (3-field reference)
  *   7. ED25519 signature valid
  *
  * Token marked used BEFORE spawn — prevents replay even on hang.
@@ -26118,6 +26122,8 @@ async function executeWithAuthority(command, args, proposal, token) {
         policy_hash: token.policy_hash,
         environment_fingerprint: token.environment_fingerprint
     };
+    // Compute current environment fingerprint once — used in step 6 (binding)
+    const currentEnvFingerprint = (0, environment_fingerprint_js_1.buildEnvironmentFingerprint)(proposal.policy_path);
     // --- Step 1: TTL ---
     const now = new Date();
     const expiresAt = new Date(token.expires_at);
@@ -26132,9 +26138,10 @@ async function executeWithAuthority(command, args, proposal, token) {
         emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
         throw err;
     }
-    // --- Step 3: Replay prevention ---
+    // --- Step 3: Replay prevention (token_id — reference implementation) ---
+    // Production kernel: composite key (proposal_hash|env_fp) per 60s window.
     if ((0, token_registry_js_1.isTokenUsed)(token.token_id)) {
-        const err = new errors_js_1.ExecutionDeniedError('TOKEN_REPLAYED', `Token replay detected: token_id=${token.token_id}`);
+        const err = new errors_js_1.ExecutionDeniedError('TOKEN_REPLAYED', `Execution replay detected: token_id=${token.token_id} has already been used`);
         emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
         throw err;
     }
@@ -26153,7 +26160,6 @@ async function executeWithAuthority(command, args, proposal, token) {
         throw err;
     }
     // --- Step 6: Environment fingerprint binding ---
-    const currentEnvFingerprint = (0, environment_fingerprint_js_1.buildEnvironmentFingerprint)(proposal.policy_path);
     if (token.environment_fingerprint !== currentEnvFingerprint) {
         const err = new errors_js_1.ExecutionDeniedError('ENV_FINGERPRINT_MISMATCH', `Environment changed since token issuance: token=${token.environment_fingerprint} current=${currentEnvFingerprint}`);
         emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
@@ -26178,13 +26184,11 @@ async function executeWithAuthority(command, args, proposal, token) {
     }
     // --- All 7 steps passed ---
     // Mark token used BEFORE spawn (replay blocked even on hang)
+    // Reference: token_id only. Production kernel: composite key (proposal_hash|env_fp).
     (0, token_registry_js_1.markTokenUsed)(token.token_id, {
         audit_ref: token.audit_ref,
-        proposal_hash: token.proposal_hash,
         policy_hash: token.policy_hash,
-        env_fingerprint: token.environment_fingerprint,
         command,
-        args,
         scope: token.scope,
         gate_mode: token.gate_mode,
         guard_version: token.guard_version
@@ -26367,108 +26371,56 @@ run().catch((err) => {
 /***/ }),
 
 /***/ 2182:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+/***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
 
 /**
- * Token Registry — Append-only used-token store.
+ * Token Registry — Reference Implementation
  *
- * Purpose: Replay prevention.
- * Once a token_id is used, it CANNOT be reused — even within the same run.
+ * REFERENCE ONLY: Demonstrates replay prevention concept.
+ * Uses token_id-only replay key (simple in-memory Set).
  *
- * Persistence: .execution_audit/used_tokens.ndjson
- * In-memory:   Set<string> for current process
+ * Production kernel: composite key (proposal_hash + environment_fingerprint)
+ * — same (proposal, environment) pair executes exactly once per 60s window.
+ * See echo-execution-kernel (private).
  *
- * Fail-closed: If registry cannot be read, assume no tokens were used.
- * If registry cannot be written, log warning but enforce in-memory.
- *
- * TTL cleanup: On init, expired token records are not loaded into memory
- * (they are still kept on disk for audit — cleanup is in-memory only).
+ * Fail-closed: If registry cannot be read, assume clean state.
+ * In-memory only: does not persist across process restarts.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.initRegistry = initRegistry;
 exports.isTokenUsed = isTokenUsed;
 exports.markTokenUsed = markTokenUsed;
 exports.appendAuditRecord = appendAuditRecord;
-const fs_1 = __nccwpck_require__(9896);
-const path_1 = __nccwpck_require__(6928);
-const AUDIT_DIR = '.execution_audit';
-const USED_TOKENS_FILE = (0, path_1.join)(AUDIT_DIR, 'used_tokens.ndjson');
-// In-memory set for current process lifetime
 const usedTokenIds = new Set();
 /**
- * Initialize registry from persisted store.
- * Expired tokens are skipped (TTL cleanup — not loaded into memory).
- * Call once at startup.
+ * Initialize registry. No-op for reference implementation
+ * (in-memory only — no persistence to load).
  */
 function initRegistry() {
-    try {
-        if ((0, fs_1.existsSync)(USED_TOKENS_FILE)) {
-            const now = new Date();
-            const lines = (0, fs_1.readFileSync)(USED_TOKENS_FILE, 'utf8').trim().split('\n');
-            for (const line of lines) {
-                if (!line.trim())
-                    continue;
-                const record = JSON.parse(line);
-                if (!record.token_id)
-                    continue;
-                // TTL cleanup: skip expired tokens from memory (keep on disk for audit)
-                if (record.expires_at) {
-                    const expiresAt = new Date(record.expires_at);
-                    if (now > expiresAt)
-                        continue; // expired — not loaded into memory
-                }
-                usedTokenIds.add(record.token_id);
-            }
-        }
-    }
-    catch {
-        // Fail-closed: start with empty in-memory set
-    }
+    // Reference implementation: memory-only, nothing to load
 }
-/** Returns true if this token_id has already been used. */
+/**
+ * Returns true if this token_id has already been used.
+ * Reference: token_id-only check.
+ * Production kernel: composite key (proposal_hash|env_fp).
+ */
 function isTokenUsed(tokenId) {
     return usedTokenIds.has(tokenId);
 }
 /**
- * Mark token as used. Persists to NDJSON audit log.
- * Must be called BEFORE command execution to prevent replay even on hang.
+ * Mark token as used. In-memory only.
+ * Must be called BEFORE command execution.
  */
-function markTokenUsed(tokenId, auditEntry) {
-    // In-memory first (immediate, always succeeds)
+function markTokenUsed(tokenId, _auditEntry) {
     usedTokenIds.add(tokenId);
-    // Persist to disk (best-effort)
-    try {
-        if (!(0, fs_1.existsSync)(AUDIT_DIR)) {
-            (0, fs_1.mkdirSync)(AUDIT_DIR, { recursive: true });
-        }
-        const record = JSON.stringify({
-            token_id: tokenId,
-            used_at: new Date().toISOString(),
-            ...auditEntry
-        });
-        (0, fs_1.appendFileSync)(USED_TOKENS_FILE, record + '\n');
-    }
-    catch (err) {
-        console.warn(`[AUDIT WARNING] Could not persist token record: ${err}`);
-        // In-memory enforcement still active — replay blocked
-    }
 }
 /**
- * Append a general audit record (not token-specific).
- * Used for STOP/HOLD/PIPELINE_ERROR events.
+ * Append a general audit record. No-op in reference implementation.
  */
-function appendAuditRecord(entry) {
-    try {
-        if (!(0, fs_1.existsSync)(AUDIT_DIR)) {
-            (0, fs_1.mkdirSync)(AUDIT_DIR, { recursive: true });
-        }
-        (0, fs_1.appendFileSync)((0, path_1.join)(AUDIT_DIR, 'log.ndjson'), JSON.stringify(entry) + '\n');
-    }
-    catch {
-        // Non-fatal
-    }
+function appendAuditRecord(_entry) {
+    // Reference implementation: no persistence
 }
 
 

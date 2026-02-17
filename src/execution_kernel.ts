@@ -1,6 +1,10 @@
 /**
  * Execution Kernel — THE ONLY authorized spawn() call site.
  *
+ * REFERENCE IMPLEMENTATION: Demonstrates the Execution Contract concept.
+ * Production kernel: echo-execution-kernel (private) — runner-bound
+ * authority tokens, composite replay key, 9-field env fingerprint.
+ *
  * SECURITY CONTRACT:
  *   spawn() MUST NOT be called anywhere else in this codebase.
  *   A verified authority token is required to reach spawn.
@@ -9,10 +13,10 @@
  * Verification chain (7 steps, fail-closed):
  *   1. Token not expired (TTL)
  *   2. decision === 'ALLOW' (blocks HOLD and any other decision)
- *   3. token_id not replayed (in-memory + NDJSON)
+ *   3. token_id not replayed (in-memory only — reference implementation)
  *   4. proposal_hash matches re-computed canonical hash
  *   5. policy_hash matches current policy content hash
- *   6. environment_fingerprint matches current runtime
+ *   6. environment_fingerprint matches current runtime (3-field reference)
  *   7. ED25519 signature valid
  *
  * Token marked used BEFORE spawn — prevents replay even on hang.
@@ -108,6 +112,9 @@ export async function executeWithAuthority(
     environment_fingerprint: token.environment_fingerprint
   };
 
+  // Compute current environment fingerprint once — used in step 6 (binding)
+  const currentEnvFingerprint = buildEnvironmentFingerprint(proposal.policy_path);
+
   // --- Step 1: TTL ---
   const now = new Date();
   const expiresAt = new Date(token.expires_at);
@@ -130,11 +137,12 @@ export async function executeWithAuthority(
     throw err;
   }
 
-  // --- Step 3: Replay prevention ---
+  // --- Step 3: Replay prevention (token_id — reference implementation) ---
+  // Production kernel: composite key (proposal_hash|env_fp) per 60s window.
   if (isTokenUsed(token.token_id)) {
     const err = new ExecutionDeniedError(
       'TOKEN_REPLAYED',
-      `Token replay detected: token_id=${token.token_id}`
+      `Execution replay detected: token_id=${token.token_id} has already been used`
     );
     emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
     throw err;
@@ -163,7 +171,6 @@ export async function executeWithAuthority(
   }
 
   // --- Step 6: Environment fingerprint binding ---
-  const currentEnvFingerprint = buildEnvironmentFingerprint(proposal.policy_path);
   if (token.environment_fingerprint !== currentEnvFingerprint) {
     const err = new ExecutionDeniedError(
       'ENV_FINGERPRINT_MISMATCH',
@@ -200,13 +207,11 @@ export async function executeWithAuthority(
 
   // --- All 7 steps passed ---
   // Mark token used BEFORE spawn (replay blocked even on hang)
+  // Reference: token_id only. Production kernel: composite key (proposal_hash|env_fp).
   markTokenUsed(token.token_id, {
     audit_ref: token.audit_ref,
-    proposal_hash: token.proposal_hash,
     policy_hash: token.policy_hash,
-    env_fingerprint: token.environment_fingerprint,
     command,
-    args,
     scope: token.scope,
     gate_mode: token.gate_mode,
     guard_version: token.guard_version

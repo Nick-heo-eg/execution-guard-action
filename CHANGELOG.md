@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.7.0-reference] - 2026-02-18
+
+### Architecture — Public/Private Kernel Split
+
+**Structural refactor: execution-guard-action is now a Reference Implementation.**
+
+The production Execution Contract Kernel has been extracted to `Nick-heo-eg/echo-execution-kernel` (private, v1.0.0).
+
+#### Moved to private kernel (`echo-execution-kernel`)
+- `environment_fingerprint.ts` — full 9-field runner identity (GITHUB_SHA, GITHUB_WORKFLOW, GITHUB_RUN_ID, RUNNER_ARCH, RUNNER_OS, GITHUB_REPOSITORY, node_version, guard_version, policy_hash)
+- `token_registry.ts` — composite replay key `proposal_hash|env_fp` + NDJSON persistence
+- `execution_kernel.ts` — hardened 7-step verification (composite replay, full env binding)
+- `authority_pipeline.ts` — ED25519 token issuance (full implementation)
+- `tests/runtime_enforced.spec.ts` T8/T9/T10 — env fingerprint mismatch tests
+
+#### Public reference implementation (this repo)
+- `src/environment_fingerprint.ts` — simplified 3-field (node_version, runner_os, policy_hash)
+- `src/token_registry.ts` — token_id-only replay, memory-only (no NDJSON)
+- `src/execution_kernel.ts` — step 3 uses `isTokenUsed(token_id)` (not composite key)
+- `tests/runtime_enforced.spec.ts` T1–T7 — concept verification only
+
+#### Added — Storage abstraction
+- `src/interfaces/token_store.ts` — `ITokenStore` interface (`store`, `retrieve`, `delete`, `has`)
+- `src/stores/memory_store.ts` — `MemoryTokenStore` + `memoryTokenStore` singleton
+- `src/adapters/openclaw/token_store.ts` — refactored to use `ITokenStore` via `setTokenStore()` injection; `/tmp` path removed
+- `src/adapters/openclaw/token_store.ts` — defaults to `memoryTokenStore` (PoC)
+
+#### README updated
+- "Reference vs Production" comparison table
+- "Execution Contract Pattern" 7-step diagram
+- "Storage abstraction (ITokenStore)" section
+- "Environment Binding" section distinguishing reference (3-field) vs production (9-field)
+
+#### Tagging strategy
+- Public (this repo): `v0.x` reference versions
+- Private kernel (`echo-execution-kernel`): `v1.x` kernel versions — v1.0.0 tagged
+
+### DoD Verification (local, v0.7.0-reference)
+- Spawn guard (test:guard) → PASS ✅
+- T1–T7 runtime_enforced → 7/7 pass ✅
+- A–G openclaw_integration → 7/7 pass ✅
+- Build: `npm run build` → successful ✅
+
+---
+
+## [0.6.1] - 2026-02-18
+
+### Added — Runner-Bound Authority Tokens + Composite Replay Prevention
+
+- **Environment fingerprint hardened** — `src/environment_fingerprint.ts` now hashes 9 runner-identity fields: `github_repository`, `github_sha`, `github_workflow`, `guard_version`, `node_version`, `policy_hash`, `runner_arch` (via `RUNNER_ARCH`), `runner_os`, `workflow_run_id`. Keys sorted ascending for determinism. A token issued on runner A cannot be verified on runner B.
+- **Composite replay key** — `src/token_registry.ts` changed from `token_id`-only replay key to composite key `proposal_hash|environment_fingerprint`. Same (proposal, environment) pair executes exactly once per 60-second `timestamp_floor` window regardless of fresh token issuance.
+- **`isExecutionUsed(proposalHash, envFp)`** — replaces `isTokenUsed(tokenId)`. Semantic shift: from "was this token used" to "did this (proposal, environment) execute". `markExecutionUsed(tokenId, proposalHash, envFp, auditEntry)` persists composite key to NDJSON for cross-run audit reconstruction.
+- **`currentEnvFingerprint` computed once** in `execution_kernel.ts` before step 3 — reused in step 3 (replay composite key) and step 6 (env binding). No double hash.
+- **T8/T9/T10 tests added** — `tests/runtime_enforced.spec.ts` now covers: T8 workflow identity mismatch (`ENV_FINGERPRINT_MISMATCH`), T9 commit SHA mismatch (`ENV_FINGERPRINT_MISMATCH`), T10 stable environment baseline (ALLOW, exit 0). Each executing test uses unique args to avoid composite-key collision within 60s window.
+- **Test C updated** — `tests/openclaw_integration.spec.ts` test C now asserts correct hardened behavior: second identical proposal in same env → `verdict: STOP`, `reason_code: TOKEN_REPLAYED`, `executed: false`. (Old behavior was a gap — composite key now closes it.)
+
+### Changed
+- `src/execution_kernel.ts`: Import updated (`isExecutionUsed`, `markExecutionUsed`). `markExecutionUsed` called with `expires_at` in audit entry (replaces `args`).
+- `src/token_registry.ts`: `usedExecutions` Set replaces `usedTokenIds` Set. `initRegistry()` rebuilds composite keys from records with `proposal_hash` + `env_fp` fields; pre-v0.6.1 records silently skipped.
+- `tests/runtime_enforced.spec.ts`: `freshAllowToken(args: string[])` now requires explicit args — removes implicit global constant dependency.
+
+### DoD Verification (local, v0.6.1)
+- Spawn guard (test:guard) → PASS ✅
+- T1–T10 runtime_enforced → 10/10 pass ✅
+- A–G openclaw_integration → 7/7 pass ✅
+- T8: workflow mismatch → `ENV_FINGERPRINT_MISMATCH` ✅
+- T9: SHA mismatch → `ENV_FINGERPRINT_MISMATCH` ✅
+- T10: stable env → ALLOW, exit 0 ✅
+- C: same proposal twice → `TOKEN_REPLAYED`, `executed=false` ✅
+- Build: `npm run build` → 2798kB dist/index.js ✅
+
+---
+
 ## [0.5.0] - 2026-02-18
 
 ### Added — OpenClaw Adapter + Scope Enforcement + Integration Tests A-G

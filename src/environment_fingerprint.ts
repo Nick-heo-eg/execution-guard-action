@@ -1,34 +1,30 @@
 /**
- * Environment Fingerprint — SHA256 of the execution environment.
+ * Environment Fingerprint — Reference Implementation
  *
- * A token issued on runner A cannot be replayed on runner B.
- * Environment mismatch = STOP, even if token is structurally valid.
+ * REFERENCE ONLY: Demonstrates the concept of environment binding.
+ * Uses 3 stable fields sufficient for local/PoC use.
  *
- * Minimal required fields for GitHub Actions context.
- * Falls back to process-level values for local/non-CI use.
+ * Production kernel: 9-field runner-identity hash including
+ * GITHUB_SHA, GITHUB_WORKFLOW, GITHUB_RUN_ID, RUNNER_ARCH, RUNNER_OS,
+ * GITHUB_REPOSITORY, and more. See echo-execution-kernel (private).
+ *
+ * Concept: A token issued in environment A cannot be verified in environment B.
+ * Environment change = different fingerprint = ENV_FINGERPRINT_MISMATCH at step 6.
  */
 
 import { createHash } from 'crypto';
 import { hashPolicyFile } from './canonical_proposal.js';
 
 export interface EnvironmentComponents {
-  runner_os: string;
-  arch: string;
-  node_version: string;
-  repo_sha: string;
-  workflow_run_id: string;
-  guard_version: string;
-  policy_hash: string;
+  node_version: string;   // process.version — runtime identity
+  runner_os: string;      // RUNNER_OS / process.platform
+  policy_hash: string;    // SHA256(policy.yaml) — policy change = new env
 }
 
 export function buildEnvironmentComponents(policyPath: string): EnvironmentComponents {
   return {
-    runner_os: process.env['RUNNER_OS'] ?? process.platform,
-    arch: process.arch,
     node_version: process.version,
-    repo_sha: process.env['GITHUB_SHA'] ?? 'local',
-    workflow_run_id: process.env['GITHUB_RUN_ID'] ?? 'local',
-    guard_version: process.env['GUARD_VERSION'] ?? '0.3.0',
+    runner_os: process.env['RUNNER_OS'] ?? process.platform,
     policy_hash: hashPolicyFile(policyPath)
   };
 }
