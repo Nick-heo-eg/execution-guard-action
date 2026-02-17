@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.2] — 2026-02-18
+
+### Security — 2nd-pass private field scrub + documentation hardening
+
+- **2nd-pass private detail scan** — additional private implementation details removed from
+  source comments, test assertions, and CHANGELOG entries discovered in secondary scan.
+  Affected files: `src/execution_kernel.ts`, `tests/openclaw_integration.spec.ts`,
+  `src/stores/memory_store.ts`, `src/adapters/openclaw/token_store.ts`, `CHANGELOG.md` (v0.7.0-reference section).
+- **Private class names removed** — named production backend implementations (`FileTokenStore`,
+  `SecureTokenStore`) replaced with generic abstraction reference in all public-facing locations.
+- **`tsconfig.json` path alias removed** — `execution-runtime-core` path mapping removed;
+  `npm prune` run to remove extraneous package from `node_modules`.
+- **ASCII architecture diagram** — README Architecture section replaced with 3-layer diagram
+  (Policy → Authority Pipeline → Execution Kernel). No enforcement depth fields or private
+  implementation details. Note: "_Production kernel adds extended verification depth at Layers 2 and 3._"
+- **Version Line Separation** — new README section documenting the permanent rule:
+  public `v0.x` reference line and private `v1.x` production line evolve independently;
+  numbers must never be synchronized; new enforcement features developed exclusively in `v1.x`.
+
+---
+
 ## [0.7.1] — 2026-02-18
 
 ### Security — Private field scrub + public repo hardening
@@ -46,17 +67,17 @@
 The production Execution Contract Kernel has been extracted to `Nick-heo-eg/echo-execution-kernel` (private, v1.0.0).
 
 #### Moved to private kernel (`echo-execution-kernel`)
-- `environment_fingerprint.ts` — full 9-field runner identity (GITHUB_SHA, GITHUB_WORKFLOW, GITHUB_RUN_ID, RUNNER_ARCH, RUNNER_OS, GITHUB_REPOSITORY, node_version, guard_version, policy_hash)
-- `token_registry.ts` — composite replay key `proposal_hash|env_fp` + NDJSON persistence
-- `execution_kernel.ts` — hardened 7-step verification (composite replay, full env binding)
-- `authority_pipeline.ts` — ED25519 token issuance (full implementation)
-- `tests/runtime_enforced.spec.ts` T8/T9/T10 — env fingerprint mismatch tests
+- `environment_fingerprint.ts` — extended runner-identity binding (private)
+- `token_registry.ts` — hardened replay prevention + NDJSON audit persistence (private)
+- `execution_kernel.ts` — hardened 7-step verification with extended env binding (private)
+- `authority_pipeline.ts` — ED25519 token issuance (full implementation, private)
+- Extended test suite — additional env binding verification (private)
 
 #### Public reference implementation (this repo)
-- `src/environment_fingerprint.ts` — simplified 3-field (node_version, runner_os, policy_hash)
-- `src/token_registry.ts` — token_id-only replay, memory-only (no NDJSON)
-- `src/execution_kernel.ts` — step 3 uses `isTokenUsed(token_id)` (not composite key)
-- `tests/runtime_enforced.spec.ts` T1–T7 — concept verification only
+- `src/environment_fingerprint.ts` — simplified reference fingerprint
+- `src/token_registry.ts` — token-id-based replay, memory-only
+- `src/execution_kernel.ts` — reference 7-step verification chain
+- `tests/runtime_enforced.spec.ts` T1–T7 — concept verification
 
 #### Added — Storage abstraction
 - `src/interfaces/token_store.ts` — `ITokenStore` interface (`store`, `retrieve`, `delete`, `has`)

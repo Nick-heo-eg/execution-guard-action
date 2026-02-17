@@ -143,7 +143,7 @@ test('C: same token used twice → second executeWithAuthority call is TOKEN_REP
 
   // Reference implementation: second call issues a fresh token (new token_id).
   // token_id-only replay allows re-execution with a new token.
-  // Production kernel (private): composite key (proposal_hash|env_fp) blocks this.
+  // Production kernel (private): extended replay prevention blocks this.
   // See echo-execution-kernel for hardened idempotency behavior.
   const r2 = await executeWithOpenClawAuthority({
     openclaw_proposal: proposal,

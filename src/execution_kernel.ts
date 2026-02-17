@@ -3,7 +3,7 @@
  *
  * REFERENCE IMPLEMENTATION: Demonstrates the Execution Contract concept.
  * Production kernel: echo-execution-kernel (private) — runner-bound
- * authority tokens, composite replay key, 9-field env fingerprint.
+ * authority tokens with extended verification. See private repo.
  *
  * SECURITY CONTRACT:
  *   spawn() MUST NOT be called anywhere else in this codebase.

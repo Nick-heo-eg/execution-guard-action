@@ -3,7 +3,7 @@
  *
  * REFERENCE IMPLEMENTATION ONLY.
  * Tokens survive only for the current process lifetime.
- * Use the private kernel's FileTokenStore or SecureTokenStore for production.
+ * Use the private kernel's persistent backend implementations for production.
  *
  * Security properties preserved:
  *   - TTL validation on retrieve (expired tokens return null)

@@ -3,7 +3,7 @@
  *
  * Uses ITokenStore interface — storage backend is injected or defaulted.
  * Default: MemoryTokenStore (reference/PoC use).
- * Production: FileTokenStore or SecureTokenStore from private kernel.
+ * Production: persistent backend implementations from private kernel.
  *
  * /tmp path removed. Storage strategy is abstracted behind ITokenStore.
  *
