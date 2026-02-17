@@ -3,49 +3,63 @@
 #
 # SECURITY CONTRACT: spawn() / execFile() / exec() MUST only appear
 # in src/execution_kernel.ts. Any other call site bypasses the authority
-# token verification chain.
+# token verification chain and the 7-step verify protocol.
 #
 # Exits non-zero if a violation is found.
-# Run this in CI on every push to main.
+# Run this in CI on every push (npm run test:guard).
 
 set -euo pipefail
 
 KERNEL_FILE="src/execution_kernel.ts"
-ALLOWED_PATTERN="execution_kernel"
+KERNEL_PATTERN="execution_kernel"
 
-# Patterns that indicate direct child_process usage
-SPAWN_PATTERN="child_process\.(spawn|exec|execFile|execFileSync|execSync|spawnSync)"
+echo "=== CI Guard: spawn/exec single-site enforcement ==="
+echo ""
 
-# Search all .ts files in src/
 violations=()
 
+# Search all .ts files in src/
 while IFS= read -r file; do
-  # Skip the kernel itself and test files
-  if [[ "$file" == *"$ALLOWED_PATTERN"* ]] || [[ "$file" == *".test."* ]] || [[ "$file" == *".spec."* ]]; then
+  # Skip the authorized kernel file
+  if [[ "$file" == *"$KERNEL_PATTERN"* ]]; then
+    continue
+  fi
+  # Skip test files
+  if [[ "$file" == *".test."* ]] || [[ "$file" == *".spec."* ]]; then
     continue
   fi
 
-  # Check for child_process import or direct spawn/exec calls
-  if grep -qE "(from 'child_process'|require\('child_process'\)|$SPAWN_PATTERN)" "$file" 2>/dev/null; then
+  # Check for child_process import OR direct spawn/exec pattern
+  if grep -qE "(from 'child_process'|require\('child_process'\)|child_process\.(spawn|exec|execFile|execFileSync|execSync|spawnSync))" "$file" 2>/dev/null; then
     violations+=("$file")
   fi
 done < <(find src -name "*.ts" 2>/dev/null)
 
 if [[ ${#violations[@]} -gt 0 ]]; then
+  echo "❌ VIOLATION: child_process found outside execution_kernel.ts"
   echo ""
-  echo "❌ [CI GUARD] spawn/exec call site violation detected"
-  echo "   Only execution_kernel.ts may import or call child_process spawn/exec."
-  echo ""
-  echo "   Violations:"
+  echo "   Authorized file: $KERNEL_FILE"
+  echo "   Unauthorized files:"
   for v in "${violations[@]}"; do
-    echo "     - $v"
-    grep -nE "(from 'child_process'|require\('child_process'\)|$SPAWN_PATTERN)" "$v" || true
     echo ""
+    echo "     File: $v"
+    grep -nE "(from 'child_process'|require\('child_process'\)|child_process\.(spawn|exec|execFile|execFileSync|execSync|spawnSync))" "$v" 2>/dev/null | while IFS= read -r match; do
+      echo "       $match"
+    done
   done
-  echo "   Fix: Remove direct spawn/exec calls. Route through executeWithAuthority()."
+  echo ""
+  echo "   Fix: Remove direct child_process usage. Route through executeWithAuthority()."
+  echo "   Authority token verification chain must not be bypassed."
   echo ""
   exit 1
 fi
 
-echo "✅ [CI GUARD] spawn/exec enforcement passed — single call site confirmed."
+echo "✅ PASS: spawn/exec enforcement — single call site confirmed ($KERNEL_FILE)"
+echo ""
+
+# Also verify the kernel file actually contains spawn (sanity check)
+if ! grep -q "from 'child_process'" "$KERNEL_FILE" 2>/dev/null; then
+  echo "⚠️  WARNING: $KERNEL_FILE does not import child_process. Check if spawn was removed."
+fi
+
 exit 0

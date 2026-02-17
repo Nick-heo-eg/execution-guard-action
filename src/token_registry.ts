@@ -5,10 +5,13 @@
  * Once a token_id is used, it CANNOT be reused — even within the same run.
  *
  * Persistence: .execution_audit/used_tokens.ndjson
- * In-memory: Set<string> for current process
+ * In-memory:   Set<string> for current process
  *
  * Fail-closed: If registry cannot be read, assume no tokens were used.
  * If registry cannot be written, log warning but enforce in-memory.
+ *
+ * TTL cleanup: On init, expired token records are not loaded into memory
+ * (they are still kept on disk for audit — cleanup is in-memory only).
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
@@ -22,16 +25,24 @@ const usedTokenIds = new Set<string>();
 
 /**
  * Initialize registry from persisted store.
+ * Expired tokens are skipped (TTL cleanup — not loaded into memory).
  * Call once at startup.
  */
 export function initRegistry(): void {
   try {
     if (existsSync(USED_TOKENS_FILE)) {
+      const now = new Date();
       const lines = readFileSync(USED_TOKENS_FILE, 'utf8').trim().split('\n');
       for (const line of lines) {
         if (!line.trim()) continue;
-        const record = JSON.parse(line) as { token_id?: string };
-        if (record.token_id) usedTokenIds.add(record.token_id);
+        const record = JSON.parse(line) as { token_id?: string; expires_at?: string };
+        if (!record.token_id) continue;
+        // TTL cleanup: skip expired tokens from memory (keep on disk for audit)
+        if (record.expires_at) {
+          const expiresAt = new Date(record.expires_at);
+          if (now > expiresAt) continue; // expired — not loaded into memory
+        }
+        usedTokenIds.add(record.token_id);
       }
     }
   } catch {
@@ -60,7 +71,11 @@ export function markTokenUsed(
     if (!existsSync(AUDIT_DIR)) {
       mkdirSync(AUDIT_DIR, { recursive: true });
     }
-    const record = JSON.stringify({ token_id: tokenId, used_at: new Date().toISOString(), ...auditEntry });
+    const record = JSON.stringify({
+      token_id: tokenId,
+      used_at: new Date().toISOString(),
+      ...auditEntry
+    });
     appendFileSync(USED_TOKENS_FILE, record + '\n');
   } catch (err) {
     console.warn(`[AUDIT WARNING] Could not persist token record: ${err}`);
@@ -70,7 +85,7 @@ export function markTokenUsed(
 
 /**
  * Append a general audit record (not token-specific).
- * Used for STOP/HOLD events that have no token.
+ * Used for STOP/HOLD/PIPELINE_ERROR events.
  */
 export function appendAuditRecord(entry: Record<string, unknown>): void {
   try {

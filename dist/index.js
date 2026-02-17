@@ -25649,21 +25649,24 @@ module.exports = {
 "use strict";
 
 /**
- * Authority Pipeline — evaluate → issue → verify → VerifiedToken
+ * Authority Pipeline — evaluate → issue → VerifiedToken
  *
- * This module is the bridge between the sealed evaluate() core
- * and the execution kernel. It orchestrates:
- *
+ * Orchestrates:
  *   1. Build canonical proposal
  *   2. Build environment fingerprint
- *   3. Call evaluate() (sealed core — never modified)
- *   4. If ALLOW: generate ephemeral ED25519 key pair, issue token, return VerifiedToken
- *   5. If STOP/DENY: append audit record, return STOP result
+ *   3. evaluate() [sealed core — never modified]
+ *   4. STRICT: rule miss → STOP (no token). PERMISSIVE: rule miss → HOLD token.
+ *   5. ALLOW: issue ALLOW token with ephemeral ED25519 key
  *
- * Key design: ephemeral ED25519 key pair is generated fresh each run.
- * Keys are never persisted — by design. Production would use HSM/KMS.
+ * SEAL BOUNDARY: evaluate() called here and nowhere else.
  *
- * SEAL BOUNDARY: evaluate() is called here and nowhere else.
+ * Decision → Token mapping:
+ *   ALLOW  → VerifiedToken(decision='ALLOW')  → kernel may spawn
+ *   STOP   → no token                          → kernel never reached
+ *   HOLD   → VerifiedToken(decision='HOLD')   → kernel blocks spawn (step 2)
+ *
+ * GateMode.STRICT  (default): evaluate DENY → STOP
+ * GateMode.PERMISSIVE        : evaluate DENY → HOLD token
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.runAuthorityPipeline = runAuthorityPipeline;
@@ -25673,20 +25676,20 @@ const canonical_proposal_js_1 = __nccwpck_require__(3258);
 const environment_fingerprint_js_1 = __nccwpck_require__(3317);
 const token_registry_js_1 = __nccwpck_require__(2182);
 const canonical_stringify_js_1 = __nccwpck_require__(2527);
-const GUARD_VERSION = process.env['GUARD_VERSION'] ?? '0.3.0';
+const mode_js_1 = __nccwpck_require__(8303);
+const uuid_v7_js_1 = __nccwpck_require__(2364);
+const GUARD_VERSION = process.env['GUARD_VERSION'] ?? '0.4.0';
 const TOKEN_TTL_MS = 5 * 60 * 1000; // 5 minutes — single-run window
 /**
- * Run the full authority pipeline for a command + policy.
+ * Run the full authority pipeline.
  *
- * Returns a PipelineResult — caller must check decision before proceeding.
  * Never throws — fail-closed: returns STOP on any internal error.
  */
-async function runAuthorityPipeline(command, args, policyPath) {
+async function runAuthorityPipeline(command, args, policyPath, mode = mode_js_1.GateMode.STRICT) {
     try {
-        return await _pipeline(command, args, policyPath);
+        return await _pipeline(command, args, policyPath, mode);
     }
     catch (err) {
-        // Fail-closed: any internal error → STOP
         const safeMsg = err instanceof Error ? err.message : String(err);
         console.error(`[PIPELINE ERROR] ${safeMsg}`);
         (0, token_registry_js_1.appendAuditRecord)({
@@ -25695,64 +25698,90 @@ async function runAuthorityPipeline(command, args, policyPath) {
             command,
             args,
             policy_path: policyPath,
+            gate_mode: mode,
             guard_version: GUARD_VERSION,
             timestamp: new Date().toISOString()
         });
         return {
             decision: 'STOP',
             proposal_hash: 'error',
-            reason: `pipeline_error: ${safeMsg}`
+            reason: `pipeline_error: ${safeMsg}`,
+            gate_mode: mode
         };
     }
 }
-async function _pipeline(command, args, policyPath) {
-    // Step 1: Build canonical proposal (binds command + args + policy hash + timestamp)
+async function _pipeline(command, args, policyPath, mode) {
+    // Step 1: Build canonical proposal
     const proposal = (0, canonical_proposal_js_1.buildCanonicalProposal)(command, args, policyPath);
     const proposalHash = (0, canonical_proposal_js_1.canonicalHash)(proposal);
-    // Step 2: Build environment fingerprint (binds runner identity)
+    const policyHash = (0, canonical_proposal_js_1.hashPolicyFile)(policyPath);
+    // Step 2: Build environment fingerprint
     const envFingerprint = (0, environment_fingerprint_js_1.buildEnvironmentFingerprint)(policyPath);
-    // Step 3: Evaluate via sealed core (evaluate.ts is NEVER modified)
+    // Step 3: Evaluate via sealed core
     const evalResult = (0, evaluate_js_1.evaluate)({ command, args, policyPath });
-    // Map core verdict to pipeline decision
-    const decision = evalResult.verdict === 'ALLOW' ? 'ALLOW' : 'STOP';
-    if (decision === 'STOP') {
+    const coreAllowed = evalResult.verdict === 'ALLOW';
+    // Step 4: Mode-gated decision
+    let tokenDecision;
+    let pipelineDecision;
+    if (coreAllowed) {
+        tokenDecision = 'ALLOW';
+        pipelineDecision = 'ALLOW';
+    }
+    else if (mode === mode_js_1.GateMode.PERMISSIVE) {
+        // PERMISSIVE: rule miss → HOLD token (auditable, not blocked at gate)
+        tokenDecision = 'HOLD';
+        pipelineDecision = 'HOLD';
+    }
+    else {
+        // STRICT: rule miss → STOP, no token issued
         (0, token_registry_js_1.appendAuditRecord)({
             event: 'STOP',
             proposal_hash: proposalHash,
             environment_fingerprint: envFingerprint,
+            policy_hash: policyHash,
             reason: evalResult.reason,
             command,
             args,
             policy_path: policyPath,
+            gate_mode: mode,
             guard_version: GUARD_VERSION,
             timestamp: new Date().toISOString()
         });
-        return { decision: 'STOP', proposal_hash: proposalHash, reason: evalResult.reason };
+        return { decision: 'STOP', proposal_hash: proposalHash, reason: evalResult.reason, gate_mode: mode };
     }
-    // Step 4: ALLOW — generate ephemeral ED25519 key pair (not persisted, per-run only)
+    // Step 5: Issue authority token (ALLOW or HOLD)
     const { privateKey: ephemeralPrivKey, publicKey: ephemeralPubKey } = (0, crypto_1.generateKeyPairSync)('ed25519');
     const publicKeyHex = ephemeralPubKey
         .export({ type: 'spki', format: 'der' })
         .toString('hex');
     const issuedAt = new Date();
     const expiresAt = new Date(issuedAt.getTime() + TOKEN_TTL_MS);
-    const auditRef = (0, crypto_1.randomUUID)();
-    const tokenId = (0, crypto_1.randomUUID)();
-    // Build token payload (without signature — this is what gets signed)
+    const auditRef = (0, uuid_v7_js_1.uuidv7)();
+    const tokenId = (0, uuid_v7_js_1.uuidv7)();
+    const scope = {
+        action: 'execute',
+        resource: `${command} ${args.join(' ')}`.trim(),
+        constraints: {
+            policy_version: policyHash,
+            gate_mode: mode,
+            guard_version: GUARD_VERSION
+        }
+    };
     const tokenPayload = {
         token_id: tokenId,
         proposal_hash: proposalHash,
+        policy_hash: policyHash,
         environment_fingerprint: envFingerprint,
-        policy_version: proposal.policy_hash, // policy version = policy content hash
-        decision: 'ALLOW',
+        policy_version: policyHash, // backward compat alias
+        decision: tokenDecision,
         audit_ref: auditRef,
         expires_at: expiresAt.toISOString(),
         issued_at: issuedAt.toISOString(),
-        scope: 'execution-guard-action',
+        scope,
+        gate_mode: mode,
         guard_version: GUARD_VERSION
     };
-    // Step 5: Sign with ephemeral ED25519 private key
-    // Node.js ED25519 signing: algorithm must be null (key type implies algorithm)
+    // Step 6: Sign with ephemeral ED25519 (algorithm=null: key type implies hash)
     const canonicalPayload = (0, canonical_stringify_js_1.canonicalStringify)(tokenPayload);
     const signatureBuffer = (0, crypto_1.sign)(null, Buffer.from(canonicalPayload, 'utf8'), ephemeralPrivKey);
     const signatureHex = signatureBuffer.toString('hex');
@@ -25761,26 +25790,29 @@ async function _pipeline(command, args, policyPath) {
         issuer_signature: signatureHex,
         public_key_hex: publicKeyHex
     };
-    // Step 6: Log issuance audit record
+    // Step 7: Log issuance
     (0, token_registry_js_1.appendAuditRecord)({
-        event: 'TOKEN_ISSUED',
+        event: `TOKEN_ISSUED_${tokenDecision}`,
         token_id: tokenId,
         audit_ref: auditRef,
         proposal_hash: proposalHash,
+        policy_hash: policyHash,
         environment_fingerprint: envFingerprint,
-        policy_version: proposal.policy_hash,
+        decision: tokenDecision,
         command,
         args,
+        gate_mode: mode,
         guard_version: GUARD_VERSION,
         expires_at: expiresAt.toISOString(),
         timestamp: issuedAt.toISOString()
     });
     return {
-        decision: 'ALLOW',
+        decision: pipelineDecision,
         proposal_hash: proposalHash,
         reason: evalResult.reason,
         token,
-        proposal
+        proposal,
+        gate_mode: mode
     };
 }
 
@@ -25903,6 +25935,50 @@ function canonicalStringify(obj) {
 
 /***/ }),
 
+/***/ 8303:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Gate Mode — controls front-gate evaluation strictness.
+ *
+ * STRICT (default):
+ *   - evaluate() DENY → immediate STOP, no token issued
+ *   - evaluate() ALLOW → ALLOW token issued → kernel verify → spawn
+ *   - Any rule miss = execution blocked at the gate
+ *
+ * PERMISSIVE:
+ *   - evaluate() DENY → HOLD token issued (decision='HOLD') → kernel blocks spawn
+ *   - evaluate() ALLOW → ALLOW token issued → kernel verify → spawn
+ *   - Token is always required. Kernel gate is never bypassed.
+ *   - Used when you need soft gates (audit trail without hard block)
+ *
+ * Invariant: execution_kernel.ts NEVER spawns for decision !== 'ALLOW'.
+ * Mode controls issuance; kernel controls execution.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GateMode = void 0;
+exports.parseModeFromEnv = parseModeFromEnv;
+var GateMode;
+(function (GateMode) {
+    GateMode["STRICT"] = "STRICT";
+    GateMode["PERMISSIVE"] = "PERMISSIVE";
+})(GateMode || (exports.GateMode = GateMode = {}));
+/**
+ * Parse gate mode from environment variable or string input.
+ * Defaults to STRICT on any unknown/missing value.
+ */
+function parseModeFromEnv() {
+    const raw = (process.env['INPUT_GATE_MODE'] ?? process.env['GATE_MODE'] ?? '').toUpperCase();
+    if (raw === 'PERMISSIVE')
+        return GateMode.PERMISSIVE;
+    return GateMode.STRICT; // Fail-strict: unknown mode = STRICT
+}
+
+
+/***/ }),
+
 /***/ 3317:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -25950,6 +26026,32 @@ function buildEnvironmentFingerprint(policyPath) {
 
 /***/ }),
 
+/***/ 3916:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * ExecutionDeniedError — thrown by execution_kernel.ts when
+ * any verification step fails before spawn().
+ *
+ * spawn() is NEVER reached when this error is thrown.
+ * error_type provides machine-readable classification for audit logs.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ExecutionDeniedError = void 0;
+class ExecutionDeniedError extends Error {
+    constructor(error_type, message) {
+        super(message);
+        this.name = 'ExecutionDeniedError';
+        this.error_type = error_type;
+    }
+}
+exports.ExecutionDeniedError = ExecutionDeniedError;
+
+
+/***/ }),
+
 /***/ 2945:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -25960,11 +26062,20 @@ function buildEnvironmentFingerprint(policyPath) {
  *
  * SECURITY CONTRACT:
  *   spawn() MUST NOT be called anywhere else in this codebase.
- *   A verified authority token is required to reach this function.
- *   Token verification is rechecked here — defense in depth.
- *   No token = no spawn. Period.
+ *   A verified authority token is required to reach spawn.
+ *   Any verification failure throws ExecutionDeniedError — spawn is never reached.
  *
- * CI guard: scripts/check-spawn.sh enforces this at build time.
+ * Verification chain (7 steps, fail-closed):
+ *   1. Token not expired (TTL)
+ *   2. decision === 'ALLOW' (blocks HOLD and any other decision)
+ *   3. token_id not replayed (in-memory + NDJSON)
+ *   4. proposal_hash matches re-computed canonical hash
+ *   5. policy_hash matches current policy content hash
+ *   6. environment_fingerprint matches current runtime
+ *   7. ED25519 signature valid
+ *
+ * Token marked used BEFORE spawn — prevents replay even on hang.
+ * CI guard: scripts/check-spawn.sh enforces single call site.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.executeWithAuthority = executeWithAuthority;
@@ -25974,73 +26085,100 @@ const token_registry_js_1 = __nccwpck_require__(2182);
 const canonical_proposal_js_1 = __nccwpck_require__(3258);
 const environment_fingerprint_js_1 = __nccwpck_require__(3317);
 const canonical_stringify_js_1 = __nccwpck_require__(2527);
+const errors_js_1 = __nccwpck_require__(3916);
+function emitAuditLog(entry) {
+    process.stdout.write(JSON.stringify(entry) + '\n');
+}
 /**
  * Execute a command under authority of a verified token.
  *
- * Verification chain (all must pass — fail-closed):
- *   1. Token not expired (TTL)
- *   2. Token decision is ALLOW
- *   3. Token not already used (replay prevention)
- *   4. proposal_hash matches re-computed canonical hash
- *   5. environment_fingerprint matches current environment
- *   6. ED25519 signature is valid
- *
- * Token is marked used BEFORE spawn — prevents replay even on hang.
- *
- * @throws Error if ANY verification step fails. spawn() is NEVER reached on failure.
+ * All 7 verification steps must pass — fail-closed.
+ * @throws ExecutionDeniedError if any step fails. spawn() is never reached on failure.
  */
 async function executeWithAuthority(command, args, proposal, token) {
-    // --- Verification Step 1: TTL ---
+    const auditBase = {
+        decision: token.decision,
+        proposal_hash: token.proposal_hash,
+        token_id: token.token_id,
+        policy_hash: token.policy_hash,
+        environment_fingerprint: token.environment_fingerprint
+    };
+    // --- Step 1: TTL ---
     const now = new Date();
     const expiresAt = new Date(token.expires_at);
     if (now > expiresAt) {
-        throw new Error(`[KERNEL] Token expired. expires_at=${token.expires_at}, now=${now.toISOString()}. SPAWN BLOCKED.`);
+        const err = new errors_js_1.ExecutionDeniedError('TOKEN_EXPIRED', `Token expired at ${token.expires_at}, now=${now.toISOString()}`);
+        emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+        throw err;
     }
-    // --- Verification Step 2: Decision gate ---
+    // --- Step 2: Decision gate (ALLOW only) ---
     if (token.decision !== 'ALLOW') {
-        throw new Error(`[KERNEL] Token decision is '${token.decision}', not ALLOW. SPAWN BLOCKED.`);
+        const err = new errors_js_1.ExecutionDeniedError('DECISION_NOT_ALLOW', `Token decision is '${token.decision}', not ALLOW`);
+        emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+        throw err;
     }
-    // --- Verification Step 3: Replay prevention (in-memory + persistent) ---
+    // --- Step 3: Replay prevention ---
     if ((0, token_registry_js_1.isTokenUsed)(token.token_id)) {
-        throw new Error(`[KERNEL] Token replay detected. token_id=${token.token_id}. SPAWN BLOCKED.`);
+        const err = new errors_js_1.ExecutionDeniedError('TOKEN_REPLAYED', `Token replay detected: token_id=${token.token_id}`);
+        emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+        throw err;
     }
-    // --- Verification Step 4: Proposal hash binding ---
+    // --- Step 4: Proposal hash binding ---
     const expectedProposalHash = (0, canonical_proposal_js_1.canonicalHash)(proposal);
     if (token.proposal_hash !== expectedProposalHash) {
-        throw new Error(`[KERNEL] Proposal hash mismatch. ` +
-            `token=${token.proposal_hash}, computed=${expectedProposalHash}. SPAWN BLOCKED.`);
+        const err = new errors_js_1.ExecutionDeniedError('PROPOSAL_HASH_MISMATCH', `Proposal hash mismatch: token=${token.proposal_hash} computed=${expectedProposalHash}`);
+        emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+        throw err;
     }
-    // --- Verification Step 5: Environment fingerprint binding ---
+    // --- Step 5: Policy hash binding (explicit) ---
+    const currentPolicyHash = (0, canonical_proposal_js_1.hashPolicyFile)(proposal.policy_path);
+    if (token.policy_hash !== currentPolicyHash) {
+        const err = new errors_js_1.ExecutionDeniedError('POLICY_HASH_MISMATCH', `Policy changed since token issuance: token=${token.policy_hash} current=${currentPolicyHash}`);
+        emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+        throw err;
+    }
+    // --- Step 6: Environment fingerprint binding ---
     const currentEnvFingerprint = (0, environment_fingerprint_js_1.buildEnvironmentFingerprint)(proposal.policy_path);
     if (token.environment_fingerprint !== currentEnvFingerprint) {
-        throw new Error(`[KERNEL] Environment fingerprint mismatch. ` +
-            `token=${token.environment_fingerprint}, current=${currentEnvFingerprint}. ` +
-            `Policy or runner environment changed between issuance and execution. SPAWN BLOCKED.`);
+        const err = new errors_js_1.ExecutionDeniedError('ENV_FINGERPRINT_MISMATCH', `Environment changed since token issuance: token=${token.environment_fingerprint} current=${currentEnvFingerprint}`);
+        emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+        throw err;
     }
-    // --- Verification Step 6: ED25519 signature ---
-    // Reconstruct the exact payload that was signed (everything except sig + public_key_hex)
+    // --- Step 7: ED25519 signature ---
     const { issuer_signature, public_key_hex, ...payloadWithoutSig } = token;
     const canonicalPayload = (0, canonical_stringify_js_1.canonicalStringify)(payloadWithoutSig);
     const publicKeyBuffer = Buffer.from(public_key_hex, 'hex');
-    const publicKeyObj = (0, crypto_1.createPublicKey)({ key: publicKeyBuffer, format: 'der', type: 'spki' });
-    // Node.js Ed25519 verify: algorithm is null (key type implies algorithm)
-    const signatureValid = (0, crypto_1.verify)(null, Buffer.from(canonicalPayload, 'utf8'), publicKeyObj, Buffer.from(issuer_signature, 'hex'));
-    if (!signatureValid) {
-        throw new Error(`[KERNEL] Signature verification failed. Token may have been tampered with. SPAWN BLOCKED.`);
+    let signatureValid = false;
+    try {
+        const publicKeyObj = (0, crypto_1.createPublicKey)({ key: publicKeyBuffer, format: 'der', type: 'spki' });
+        signatureValid = (0, crypto_1.verify)(null, Buffer.from(canonicalPayload, 'utf8'), publicKeyObj, Buffer.from(issuer_signature, 'hex'));
     }
-    // --- All verifications passed ---
-    // Mark token used BEFORE spawn (prevents replay even if process hangs)
+    catch {
+        signatureValid = false;
+    }
+    if (!signatureValid) {
+        const err = new errors_js_1.ExecutionDeniedError('SIGNATURE_INVALID', 'ED25519 signature verification failed — token may have been tampered');
+        emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+        throw err;
+    }
+    // --- All 7 steps passed ---
+    // Mark token used BEFORE spawn (replay blocked even on hang)
     (0, token_registry_js_1.markTokenUsed)(token.token_id, {
         audit_ref: token.audit_ref,
         proposal_hash: token.proposal_hash,
+        policy_hash: token.policy_hash,
         env_fingerprint: token.environment_fingerprint,
         command,
         args,
         scope: token.scope,
+        gate_mode: token.gate_mode,
         guard_version: token.guard_version
     });
-    console.log(`[KERNEL] Token verified. token_id=${token.token_id} audit_ref=${token.audit_ref}`);
-    console.log(`[KERNEL] Spawning: ${command} ${args.join(' ')}`);
+    emitAuditLog({
+        ...auditBase,
+        reason: `policy_match: ${token.scope.constraints.policy_version}`,
+        executed: true
+    });
     // THE ONLY spawn() call in this codebase.
     const exitCode = await new Promise((resolve, reject) => {
         const child = (0, child_process_1.spawn)(command, args, { stdio: 'inherit', shell: false });
@@ -26050,7 +26188,8 @@ async function executeWithAuthority(command, args, proposal, token) {
     return {
         exit_code: exitCode,
         token_id: token.token_id,
-        audit_ref: token.audit_ref
+        audit_ref: token.audit_ref,
+        executed: true
     };
 }
 
@@ -26063,20 +26202,15 @@ async function executeWithAuthority(command, args, proposal, token) {
 "use strict";
 
 /**
- * Execution Guard Action — Main Entry Point (v0.3.0)
+ * Execution Guard Action — Main Entry Point (v0.4.0)
  *
- * Deny-by-default execution layer for GitHub Actions.
- * Built on Execution Boundary architecture (execution-runtime-core).
+ * 3-layer architecture:
+ *   Layer 1: Front Gate (GateMode.STRICT | GateMode.PERMISSIVE)
+ *   Layer 2: Authority Token (cryptographic binding, replay, TTL, policy lock)
+ *   Layer 3: Execution Kernel (single spawn site, 7-step verify)
  *
- * Core is SEALED. This adapter NEVER modifies core.
+ * Core is SEALED. This adapter NEVER modifies evaluate.ts.
  * Core invariant hash: 54add9db6f88f28a81bbfd428d47fa011ad9151b91df672c3c1fa75beac32f04
- *
- * v0.3.0: Authority token layer connected to execution path.
- *   - evaluate() → ALLOW → token issued → kernel verifies → spawn
- *   - STOP: token never issued, spawn never reached
- *   - Replay: blocked by token_registry (in-memory + NDJSON)
- *   - Environment change: blocked by fingerprint binding
- *   - Policy change: blocked by policy_hash binding
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -26116,47 +26250,57 @@ const core = __importStar(__nccwpck_require__(7484));
 const token_registry_js_1 = __nccwpck_require__(2182);
 const authority_pipeline_js_1 = __nccwpck_require__(7411);
 const execution_kernel_js_1 = __nccwpck_require__(2945);
+const mode_js_1 = __nccwpck_require__(8303);
+const errors_js_1 = __nccwpck_require__(3916);
 async function run() {
-    // Initialize token replay registry (loads from .execution_audit/used_tokens.ndjson)
+    // Initialize token replay registry
     (0, token_registry_js_1.initRegistry)();
-    // Read inputs via GitHub Actions environment variables
     const rawCommand = process.env['INPUT_COMMAND'] ?? '';
     const policyPath = process.env['INPUT_POLICY_PATH'] ?? './policy.yaml';
     const failOnHoldStr = process.env['INPUT_FAIL_ON_HOLD'] ?? 'true';
     const failOnHold = failOnHoldStr.toLowerCase() !== 'false';
+    const mode = (0, mode_js_1.parseModeFromEnv)();
     if (!rawCommand.trim()) {
         core.setFailed('INPUT_COMMAND is required but was not provided.');
         process.exit(1);
     }
-    // Parse command string into command + args
     const parts = rawCommand.trim().split(/\s+/);
     const command = parts[0];
     const args = parts.slice(1);
-    // Run authority pipeline:
-    //   evaluate (sealed core) → if ALLOW: issue token → return VerifiedToken
-    const pipelineResult = await (0, authority_pipeline_js_1.runAuthorityPipeline)(command, args, policyPath);
-    // Always output these three fields
+    // Run authority pipeline (Front Gate + Token Issuance)
+    const pipelineResult = await (0, authority_pipeline_js_1.runAuthorityPipeline)(command, args, policyPath, mode);
+    // Structured log line — one per decision event
+    const logEntry = {
+        decision: pipelineResult.decision,
+        proposal_hash: pipelineResult.proposal_hash,
+        token_id: pipelineResult.token?.token_id ?? null,
+        policy_hash: pipelineResult.token?.policy_hash ?? null,
+        environment_fingerprint: pipelineResult.token?.environment_fingerprint ?? null,
+        reason: pipelineResult.reason,
+        executed: false,
+        gate_mode: mode,
+        error_type: null
+    };
+    process.stdout.write(JSON.stringify(logEntry) + '\n');
+    // Legacy human-readable output
     console.log(`DECISION:      ${pipelineResult.decision}`);
     console.log(`PROPOSAL_HASH: ${pipelineResult.proposal_hash}`);
     console.log(`REASON:        ${pipelineResult.reason}`);
-    // Set standard outputs
+    // GitHub Actions outputs
     core.setOutput('verdict', pipelineResult.decision);
     core.setOutput('proposal_hash', pipelineResult.proposal_hash);
     core.setOutput('reason', pipelineResult.reason);
-    // Set token outputs (empty string on STOP — token was never issued)
     core.setOutput('token_id', pipelineResult.token?.token_id ?? '');
     core.setOutput('audit_ref', pipelineResult.token?.audit_ref ?? '');
     core.setOutput('environment_fingerprint', pipelineResult.token?.environment_fingerprint ?? '');
+    core.setOutput('gate_mode', mode);
     // --- Verdict branching ---
     if (pipelineResult.decision === 'ALLOW') {
-        // Token was issued by pipeline — hand it to the kernel for execution
-        // Kernel will re-verify all invariants before calling spawn()
         if (!pipelineResult.token || !pipelineResult.proposal) {
-            // Should never happen — ALLOW always includes token+proposal
-            core.setFailed('[INVARIANT VIOLATION] ALLOW decision but token missing. STOP.');
+            core.setFailed('[INVARIANT VIOLATION] ALLOW with no token. STOP.');
             process.exit(1);
         }
-        console.log(`\n✅ Execution permitted: ${command} ${args.join(' ')}`);
+        console.log(`\n✅ Execution permitted (${mode}): ${command} ${args.join(' ')}`);
         console.log(`   token_id:  ${pipelineResult.token.token_id}`);
         console.log(`   audit_ref: ${pipelineResult.token.audit_ref}`);
         try {
@@ -26166,31 +26310,35 @@ async function run() {
             }
             process.exit(kernelResult.exit_code);
         }
-        catch (kernelErr) {
-            const msg = kernelErr instanceof Error ? kernelErr.message : String(kernelErr);
-            console.error(`\n❌ KERNEL VERIFICATION FAILED: ${msg}`);
-            core.setFailed(`Kernel verification failed: ${msg}`);
+        catch (err) {
+            const isDenied = err instanceof errors_js_1.ExecutionDeniedError;
+            const msg = err instanceof Error ? err.message : String(err);
+            const errType = isDenied ? err.error_type : 'UNKNOWN';
+            console.error(`\n❌ KERNEL VERIFICATION FAILED [${errType}]: ${msg}`);
+            core.setFailed(`Kernel verification failed [${errType}]: ${msg}`);
             process.exit(1);
         }
     }
     else if (pipelineResult.decision === 'STOP') {
         console.error('\n❌ EXECUTION BLOCKED (STOP)');
-        console.error(`   Command: ${command} ${args.join(' ')}`);
-        console.error(`   Policy:  ${policyPath}`);
-        console.error(`   Reason:  ${pipelineResult.reason}`);
+        console.error(`   Command:   ${command} ${args.join(' ')}`);
+        console.error(`   Policy:    ${policyPath}`);
+        console.error(`   Mode:      ${mode}`);
+        console.error(`   Reason:    ${pipelineResult.reason}`);
         core.setFailed(`Execution denied by policy. DECISION: STOP`);
         process.exit(1);
     }
     else {
-        // HOLD — soft gate (future extension)
+        // HOLD — PERMISSIVE mode soft gate
+        console.warn(`\n⚠️  EXECUTION HELD (HOLD) — gate_mode=${mode}`);
+        console.warn(`   Command:   ${command} ${args.join(' ')}`);
+        console.warn(`   token_id:  ${pipelineResult.token?.token_id ?? 'none'}`);
         if (failOnHold) {
-            console.warn('\n⚠️  EXECUTION HELD (HOLD) — fail_on_hold=true');
             core.setFailed(`Execution held by policy. DECISION: HOLD`);
             process.exit(1);
         }
         else {
-            console.warn('\n⚠️  EXECUTION HELD (HOLD) — fail_on_hold=false, continuing');
-            core.warning(`Execution held by policy but fail_on_hold=false. DECISION: HOLD`);
+            core.warning(`Execution held by policy, fail_on_hold=false. DECISION: HOLD`);
             process.exit(0);
         }
     }
@@ -26215,10 +26363,13 @@ run().catch((err) => {
  * Once a token_id is used, it CANNOT be reused — even within the same run.
  *
  * Persistence: .execution_audit/used_tokens.ndjson
- * In-memory: Set<string> for current process
+ * In-memory:   Set<string> for current process
  *
  * Fail-closed: If registry cannot be read, assume no tokens were used.
  * If registry cannot be written, log warning but enforce in-memory.
+ *
+ * TTL cleanup: On init, expired token records are not loaded into memory
+ * (they are still kept on disk for audit — cleanup is in-memory only).
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.initRegistry = initRegistry;
@@ -26233,18 +26384,27 @@ const USED_TOKENS_FILE = (0, path_1.join)(AUDIT_DIR, 'used_tokens.ndjson');
 const usedTokenIds = new Set();
 /**
  * Initialize registry from persisted store.
+ * Expired tokens are skipped (TTL cleanup — not loaded into memory).
  * Call once at startup.
  */
 function initRegistry() {
     try {
         if ((0, fs_1.existsSync)(USED_TOKENS_FILE)) {
+            const now = new Date();
             const lines = (0, fs_1.readFileSync)(USED_TOKENS_FILE, 'utf8').trim().split('\n');
             for (const line of lines) {
                 if (!line.trim())
                     continue;
                 const record = JSON.parse(line);
-                if (record.token_id)
-                    usedTokenIds.add(record.token_id);
+                if (!record.token_id)
+                    continue;
+                // TTL cleanup: skip expired tokens from memory (keep on disk for audit)
+                if (record.expires_at) {
+                    const expiresAt = new Date(record.expires_at);
+                    if (now > expiresAt)
+                        continue; // expired — not loaded into memory
+                }
+                usedTokenIds.add(record.token_id);
             }
         }
     }
@@ -26268,7 +26428,11 @@ function markTokenUsed(tokenId, auditEntry) {
         if (!(0, fs_1.existsSync)(AUDIT_DIR)) {
             (0, fs_1.mkdirSync)(AUDIT_DIR, { recursive: true });
         }
-        const record = JSON.stringify({ token_id: tokenId, used_at: new Date().toISOString(), ...auditEntry });
+        const record = JSON.stringify({
+            token_id: tokenId,
+            used_at: new Date().toISOString(),
+            ...auditEntry
+        });
         (0, fs_1.appendFileSync)(USED_TOKENS_FILE, record + '\n');
     }
     catch (err) {
@@ -26278,7 +26442,7 @@ function markTokenUsed(tokenId, auditEntry) {
 }
 /**
  * Append a general audit record (not token-specific).
- * Used for STOP/HOLD events that have no token.
+ * Used for STOP/HOLD/PIPELINE_ERROR events.
  */
 function appendAuditRecord(entry) {
     try {
@@ -26290,6 +26454,60 @@ function appendAuditRecord(entry) {
     catch {
         // Non-fatal
     }
+}
+
+
+/***/ }),
+
+/***/ 2364:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/**
+ * UUIDv7 Generator — time-ordered, sortable UUID.
+ *
+ * UUIDv7 structure (RFC 9562):
+ *   - Bits 0-47:  unix_ts_ms (48 bits, millisecond precision)
+ *   - Bits 48-51: version (4 bits = 0b0111)
+ *   - Bits 52-63: rand_a (12 bits random)
+ *   - Bits 64-65: variant (2 bits = 0b10)
+ *   - Bits 66-127: rand_b (62 bits random)
+ *
+ * Properties:
+ *   - Monotonically increasing within same millisecond (via rand_a increment)
+ *   - Lexicographically sortable by time
+ *   - Cryptographically random remainder
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.uuidv7 = uuidv7;
+const crypto_1 = __nccwpck_require__(6982);
+/**
+ * Generate a UUIDv7.
+ * Suitable for token_id and audit_ref fields.
+ */
+function uuidv7() {
+    const now = BigInt(Date.now()); // 48-bit ms timestamp
+    // 12 random bits for rand_a
+    const randA = BigInt((0, crypto_1.randomBytes)(2).readUInt16BE(0) & 0x0fff);
+    // 62 random bits for rand_b (read 8 bytes, mask top 2 bits)
+    const randBBytes = (0, crypto_1.randomBytes)(8);
+    const randBRaw = randBBytes.readBigUInt64BE(0);
+    const randB = randBRaw & BigInt('0x3FFFFFFFFFFFFFFF'); // mask top 2 bits
+    // Assemble high 64 bits: [unix_ts_ms: 48][ver: 4 = 0x7][rand_a: 12]
+    const high = (now << 16n) | (0x7n << 12n) | randA;
+    // Assemble low 64 bits: [variant: 2 = 0b10][rand_b: 62]
+    const low = (0x2n << 62n) | randB;
+    const highHex = high.toString(16).padStart(16, '0');
+    const lowHex = low.toString(16).padStart(16, '0');
+    const combined = highHex + lowHex;
+    return [
+        combined.slice(0, 8),
+        combined.slice(8, 12),
+        combined.slice(12, 16),
+        combined.slice(16, 20),
+        combined.slice(20)
+    ].join('-');
 }
 
 

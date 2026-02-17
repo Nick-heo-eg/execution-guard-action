@@ -1,30 +1,35 @@
 /**
- * Authority Pipeline — evaluate → issue → verify → VerifiedToken
+ * Authority Pipeline — evaluate → issue → VerifiedToken
  *
- * This module is the bridge between the sealed evaluate() core
- * and the execution kernel. It orchestrates:
- *
+ * Orchestrates:
  *   1. Build canonical proposal
  *   2. Build environment fingerprint
- *   3. Call evaluate() (sealed core — never modified)
- *   4. If ALLOW: generate ephemeral ED25519 key pair, issue token, return VerifiedToken
- *   5. If STOP/DENY: append audit record, return STOP result
+ *   3. evaluate() [sealed core — never modified]
+ *   4. STRICT: rule miss → STOP (no token). PERMISSIVE: rule miss → HOLD token.
+ *   5. ALLOW: issue ALLOW token with ephemeral ED25519 key
  *
- * Key design: ephemeral ED25519 key pair is generated fresh each run.
- * Keys are never persisted — by design. Production would use HSM/KMS.
+ * SEAL BOUNDARY: evaluate() called here and nowhere else.
  *
- * SEAL BOUNDARY: evaluate() is called here and nowhere else.
+ * Decision → Token mapping:
+ *   ALLOW  → VerifiedToken(decision='ALLOW')  → kernel may spawn
+ *   STOP   → no token                          → kernel never reached
+ *   HOLD   → VerifiedToken(decision='HOLD')   → kernel blocks spawn (step 2)
+ *
+ * GateMode.STRICT  (default): evaluate DENY → STOP
+ * GateMode.PERMISSIVE        : evaluate DENY → HOLD token
  */
 
-import { generateKeyPairSync, sign as cryptoSign, randomUUID } from 'crypto';
+import { generateKeyPairSync, sign as cryptoSign } from 'crypto';
 import { evaluate } from 'execution-runtime-core/src/core/evaluate.js';
-import { buildCanonicalProposal, canonicalHash, type CanonicalProposal } from './canonical_proposal.js';
+import { buildCanonicalProposal, canonicalHash, hashPolicyFile, type CanonicalProposal } from './canonical_proposal.js';
 import { buildEnvironmentFingerprint } from './environment_fingerprint.js';
 import { appendAuditRecord } from './token_registry.js';
 import { canonicalStringify } from './canonical_stringify.js';
-import type { VerifiedToken } from './execution_kernel.js';
+import { GateMode } from './config/mode.js';
+import { uuidv7 } from './uuid_v7.js';
+import type { VerifiedToken, TokenScope, TokenDecision } from './execution_kernel.js';
 
-const GUARD_VERSION = process.env['GUARD_VERSION'] ?? '0.3.0';
+const GUARD_VERSION = process.env['GUARD_VERSION'] ?? '0.4.0';
 const TOKEN_TTL_MS = 5 * 60 * 1000; // 5 minutes — single-run window
 
 export type PipelineDecision = 'ALLOW' | 'STOP' | 'HOLD';
@@ -33,27 +38,27 @@ export interface PipelineResult {
   decision: PipelineDecision;
   proposal_hash: string;
   reason: string;
-  /** Present only when decision === 'ALLOW' */
+  /** Present when decision === 'ALLOW' or 'HOLD' */
   token?: VerifiedToken;
-  /** Present only when decision === 'ALLOW' */
+  /** Present when decision === 'ALLOW' or 'HOLD' */
   proposal?: CanonicalProposal;
+  gate_mode: string;
 }
 
 /**
- * Run the full authority pipeline for a command + policy.
+ * Run the full authority pipeline.
  *
- * Returns a PipelineResult — caller must check decision before proceeding.
  * Never throws — fail-closed: returns STOP on any internal error.
  */
 export async function runAuthorityPipeline(
   command: string,
   args: string[],
-  policyPath: string
+  policyPath: string,
+  mode: GateMode = GateMode.STRICT
 ): Promise<PipelineResult> {
   try {
-    return await _pipeline(command, args, policyPath);
+    return await _pipeline(command, args, policyPath, mode);
   } catch (err) {
-    // Fail-closed: any internal error → STOP
     const safeMsg = err instanceof Error ? err.message : String(err);
     console.error(`[PIPELINE ERROR] ${safeMsg}`);
     appendAuditRecord({
@@ -62,13 +67,15 @@ export async function runAuthorityPipeline(
       command,
       args,
       policy_path: policyPath,
+      gate_mode: mode,
       guard_version: GUARD_VERSION,
       timestamp: new Date().toISOString()
     });
     return {
       decision: 'STOP',
       proposal_hash: 'error',
-      reason: `pipeline_error: ${safeMsg}`
+      reason: `pipeline_error: ${safeMsg}`,
+      gate_mode: mode
     };
   }
 }
@@ -76,37 +83,52 @@ export async function runAuthorityPipeline(
 async function _pipeline(
   command: string,
   args: string[],
-  policyPath: string
+  policyPath: string,
+  mode: GateMode
 ): Promise<PipelineResult> {
-  // Step 1: Build canonical proposal (binds command + args + policy hash + timestamp)
+  // Step 1: Build canonical proposal
   const proposal = buildCanonicalProposal(command, args, policyPath);
   const proposalHash = canonicalHash(proposal);
+  const policyHash = hashPolicyFile(policyPath);
 
-  // Step 2: Build environment fingerprint (binds runner identity)
+  // Step 2: Build environment fingerprint
   const envFingerprint = buildEnvironmentFingerprint(policyPath);
 
-  // Step 3: Evaluate via sealed core (evaluate.ts is NEVER modified)
+  // Step 3: Evaluate via sealed core
   const evalResult = evaluate({ command, args, policyPath });
 
-  // Map core verdict to pipeline decision
-  const decision: PipelineDecision = evalResult.verdict === 'ALLOW' ? 'ALLOW' : 'STOP';
+  const coreAllowed = evalResult.verdict === 'ALLOW';
 
-  if (decision === 'STOP') {
+  // Step 4: Mode-gated decision
+  let tokenDecision: TokenDecision;
+  let pipelineDecision: PipelineDecision;
+
+  if (coreAllowed) {
+    tokenDecision = 'ALLOW';
+    pipelineDecision = 'ALLOW';
+  } else if (mode === GateMode.PERMISSIVE) {
+    // PERMISSIVE: rule miss → HOLD token (auditable, not blocked at gate)
+    tokenDecision = 'HOLD';
+    pipelineDecision = 'HOLD';
+  } else {
+    // STRICT: rule miss → STOP, no token issued
     appendAuditRecord({
       event: 'STOP',
       proposal_hash: proposalHash,
       environment_fingerprint: envFingerprint,
+      policy_hash: policyHash,
       reason: evalResult.reason,
       command,
       args,
       policy_path: policyPath,
+      gate_mode: mode,
       guard_version: GUARD_VERSION,
       timestamp: new Date().toISOString()
     });
-    return { decision: 'STOP', proposal_hash: proposalHash, reason: evalResult.reason };
+    return { decision: 'STOP', proposal_hash: proposalHash, reason: evalResult.reason, gate_mode: mode };
   }
 
-  // Step 4: ALLOW — generate ephemeral ED25519 key pair (not persisted, per-run only)
+  // Step 5: Issue authority token (ALLOW or HOLD)
   const { privateKey: ephemeralPrivKey, publicKey: ephemeralPubKey } =
     generateKeyPairSync('ed25519');
 
@@ -116,25 +138,35 @@ async function _pipeline(
 
   const issuedAt = new Date();
   const expiresAt = new Date(issuedAt.getTime() + TOKEN_TTL_MS);
-  const auditRef = randomUUID();
-  const tokenId = randomUUID();
+  const auditRef = uuidv7();
+  const tokenId = uuidv7();
 
-  // Build token payload (without signature — this is what gets signed)
+  const scope: TokenScope = {
+    action: 'execute',
+    resource: `${command} ${args.join(' ')}`.trim(),
+    constraints: {
+      policy_version: policyHash,
+      gate_mode: mode,
+      guard_version: GUARD_VERSION
+    }
+  };
+
   const tokenPayload: Omit<VerifiedToken, 'issuer_signature' | 'public_key_hex'> = {
     token_id: tokenId,
     proposal_hash: proposalHash,
+    policy_hash: policyHash,
     environment_fingerprint: envFingerprint,
-    policy_version: proposal.policy_hash, // policy version = policy content hash
-    decision: 'ALLOW',
+    policy_version: policyHash, // backward compat alias
+    decision: tokenDecision,
     audit_ref: auditRef,
     expires_at: expiresAt.toISOString(),
     issued_at: issuedAt.toISOString(),
-    scope: 'execution-guard-action',
+    scope,
+    gate_mode: mode,
     guard_version: GUARD_VERSION
   };
 
-  // Step 5: Sign with ephemeral ED25519 private key
-  // Node.js ED25519 signing: algorithm must be null (key type implies algorithm)
+  // Step 6: Sign with ephemeral ED25519 (algorithm=null: key type implies hash)
   const canonicalPayload = canonicalStringify(tokenPayload);
   const signatureBuffer = cryptoSign(null, Buffer.from(canonicalPayload, 'utf8'), ephemeralPrivKey);
   const signatureHex = signatureBuffer.toString('hex');
@@ -145,26 +177,29 @@ async function _pipeline(
     public_key_hex: publicKeyHex
   };
 
-  // Step 6: Log issuance audit record
+  // Step 7: Log issuance
   appendAuditRecord({
-    event: 'TOKEN_ISSUED',
+    event: `TOKEN_ISSUED_${tokenDecision}`,
     token_id: tokenId,
     audit_ref: auditRef,
     proposal_hash: proposalHash,
+    policy_hash: policyHash,
     environment_fingerprint: envFingerprint,
-    policy_version: proposal.policy_hash,
+    decision: tokenDecision,
     command,
     args,
+    gate_mode: mode,
     guard_version: GUARD_VERSION,
     expires_at: expiresAt.toISOString(),
     timestamp: issuedAt.toISOString()
   });
 
   return {
-    decision: 'ALLOW',
+    decision: pipelineDecision,
     proposal_hash: proposalHash,
     reason: evalResult.reason,
     token,
-    proposal
+    proposal,
+    gate_mode: mode
   };
 }

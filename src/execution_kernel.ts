@@ -3,35 +3,64 @@
  *
  * SECURITY CONTRACT:
  *   spawn() MUST NOT be called anywhere else in this codebase.
- *   A verified authority token is required to reach this function.
- *   Token verification is rechecked here — defense in depth.
- *   No token = no spawn. Period.
+ *   A verified authority token is required to reach spawn.
+ *   Any verification failure throws ExecutionDeniedError — spawn is never reached.
  *
- * CI guard: scripts/check-spawn.sh enforces this at build time.
+ * Verification chain (7 steps, fail-closed):
+ *   1. Token not expired (TTL)
+ *   2. decision === 'ALLOW' (blocks HOLD and any other decision)
+ *   3. token_id not replayed (in-memory + NDJSON)
+ *   4. proposal_hash matches re-computed canonical hash
+ *   5. policy_hash matches current policy content hash
+ *   6. environment_fingerprint matches current runtime
+ *   7. ED25519 signature valid
+ *
+ * Token marked used BEFORE spawn — prevents replay even on hang.
+ * CI guard: scripts/check-spawn.sh enforces single call site.
  */
 
 import { spawn } from 'child_process';
 import { verify as cryptoVerify, createPublicKey } from 'crypto';
 import { isTokenUsed, markTokenUsed } from './token_registry.js';
-import { canonicalHash, type CanonicalProposal } from './canonical_proposal.js';
+import { canonicalHash, hashPolicyFile, type CanonicalProposal } from './canonical_proposal.js';
 import { buildEnvironmentFingerprint } from './environment_fingerprint.js';
 import { canonicalStringify } from './canonical_stringify.js';
+import { ExecutionDeniedError } from './errors.js';
 
-/** A token that has been issued and verified by the authority pipeline. */
+export type TokenDecision = 'ALLOW' | 'HOLD';
+
+/** Structured scope bound to the token — action + resource + constraints. */
+export interface TokenScope {
+  action: string;       // e.g. 'execute'
+  resource: string;     // e.g. 'echo hello from execution-guard'
+  constraints: {
+    policy_version: string;  // = policy_hash at issuance time
+    gate_mode: string;       // 'STRICT' | 'PERMISSIVE'
+    guard_version: string;
+  };
+}
+
+/**
+ * A token issued by authority_pipeline and passed to the kernel for execution.
+ * ALLOW tokens may reach spawn() after all 7 verification steps pass.
+ * HOLD tokens are immediately blocked (step 2).
+ */
 export interface VerifiedToken {
-  token_id: string;
-  proposal_hash: string;
-  environment_fingerprint: string;
-  policy_version: string;
-  decision: 'ALLOW';
-  audit_ref: string;
-  expires_at: string;
-  issued_at: string;
-  scope: string;
+  token_id: string;                  // UUIDv7
+  proposal_hash: string;             // SHA256(canonical_proposal)
+  policy_hash: string;               // SHA256(policy.yaml) — explicit field
+  environment_fingerprint: string;   // SHA256(runner environment)
+  policy_version: string;            // = policy_hash (backward compat alias)
+  decision: TokenDecision;           // 'ALLOW' | 'HOLD'
+  audit_ref: string;                 // UUIDv7 cross-reference
+  expires_at: string;                // ISO8601
+  issued_at: string;                 // ISO8601
+  scope: TokenScope;                 // structured scope
+  gate_mode: 'STRICT' | 'PERMISSIVE';
   guard_version: string;
-  /** ED25519 signature over canonical token payload (excluding this field) */
+  /** ED25519 signature over canonical token payload (excluding sig + public_key_hex) */
   issuer_signature: string;
-  /** Public key hex used to issue this token (ephemeral, per-run) */
+  /** Ephemeral public key used to issue this token (per-run, not persisted) */
   public_key_hex: string;
 }
 
@@ -39,22 +68,30 @@ export interface KernelResult {
   exit_code: number;
   token_id: string;
   audit_ref: string;
+  executed: true;
+}
+
+/** JSON audit log entry format */
+interface KernelAuditEntry {
+  decision: string;
+  proposal_hash: string;
+  token_id: string;
+  policy_hash: string;
+  environment_fingerprint: string;
+  reason: string;
+  executed: boolean;
+  error_type?: string;
+}
+
+function emitAuditLog(entry: KernelAuditEntry): void {
+  process.stdout.write(JSON.stringify(entry) + '\n');
 }
 
 /**
  * Execute a command under authority of a verified token.
  *
- * Verification chain (all must pass — fail-closed):
- *   1. Token not expired (TTL)
- *   2. Token decision is ALLOW
- *   3. Token not already used (replay prevention)
- *   4. proposal_hash matches re-computed canonical hash
- *   5. environment_fingerprint matches current environment
- *   6. ED25519 signature is valid
- *
- * Token is marked used BEFORE spawn — prevents replay even on hang.
- *
- * @throws Error if ANY verification step fails. spawn() is NEVER reached on failure.
+ * All 7 verification steps must pass — fail-closed.
+ * @throws ExecutionDeniedError if any step fails. spawn() is never reached on failure.
  */
 export async function executeWithAuthority(
   command: string,
@@ -62,81 +99,124 @@ export async function executeWithAuthority(
   proposal: CanonicalProposal,
   token: VerifiedToken
 ): Promise<KernelResult> {
-  // --- Verification Step 1: TTL ---
+
+  const auditBase = {
+    decision: token.decision,
+    proposal_hash: token.proposal_hash,
+    token_id: token.token_id,
+    policy_hash: token.policy_hash,
+    environment_fingerprint: token.environment_fingerprint
+  };
+
+  // --- Step 1: TTL ---
   const now = new Date();
   const expiresAt = new Date(token.expires_at);
   if (now > expiresAt) {
-    throw new Error(
-      `[KERNEL] Token expired. expires_at=${token.expires_at}, now=${now.toISOString()}. SPAWN BLOCKED.`
+    const err = new ExecutionDeniedError(
+      'TOKEN_EXPIRED',
+      `Token expired at ${token.expires_at}, now=${now.toISOString()}`
     );
+    emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+    throw err;
   }
 
-  // --- Verification Step 2: Decision gate ---
+  // --- Step 2: Decision gate (ALLOW only) ---
   if (token.decision !== 'ALLOW') {
-    throw new Error(
-      `[KERNEL] Token decision is '${token.decision}', not ALLOW. SPAWN BLOCKED.`
+    const err = new ExecutionDeniedError(
+      'DECISION_NOT_ALLOW',
+      `Token decision is '${token.decision}', not ALLOW`
     );
+    emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+    throw err;
   }
 
-  // --- Verification Step 3: Replay prevention (in-memory + persistent) ---
+  // --- Step 3: Replay prevention ---
   if (isTokenUsed(token.token_id)) {
-    throw new Error(
-      `[KERNEL] Token replay detected. token_id=${token.token_id}. SPAWN BLOCKED.`
+    const err = new ExecutionDeniedError(
+      'TOKEN_REPLAYED',
+      `Token replay detected: token_id=${token.token_id}`
     );
+    emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+    throw err;
   }
 
-  // --- Verification Step 4: Proposal hash binding ---
+  // --- Step 4: Proposal hash binding ---
   const expectedProposalHash = canonicalHash(proposal);
   if (token.proposal_hash !== expectedProposalHash) {
-    throw new Error(
-      `[KERNEL] Proposal hash mismatch. ` +
-      `token=${token.proposal_hash}, computed=${expectedProposalHash}. SPAWN BLOCKED.`
+    const err = new ExecutionDeniedError(
+      'PROPOSAL_HASH_MISMATCH',
+      `Proposal hash mismatch: token=${token.proposal_hash} computed=${expectedProposalHash}`
     );
+    emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+    throw err;
   }
 
-  // --- Verification Step 5: Environment fingerprint binding ---
+  // --- Step 5: Policy hash binding (explicit) ---
+  const currentPolicyHash = hashPolicyFile(proposal.policy_path);
+  if (token.policy_hash !== currentPolicyHash) {
+    const err = new ExecutionDeniedError(
+      'POLICY_HASH_MISMATCH',
+      `Policy changed since token issuance: token=${token.policy_hash} current=${currentPolicyHash}`
+    );
+    emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+    throw err;
+  }
+
+  // --- Step 6: Environment fingerprint binding ---
   const currentEnvFingerprint = buildEnvironmentFingerprint(proposal.policy_path);
   if (token.environment_fingerprint !== currentEnvFingerprint) {
-    throw new Error(
-      `[KERNEL] Environment fingerprint mismatch. ` +
-      `token=${token.environment_fingerprint}, current=${currentEnvFingerprint}. ` +
-      `Policy or runner environment changed between issuance and execution. SPAWN BLOCKED.`
+    const err = new ExecutionDeniedError(
+      'ENV_FINGERPRINT_MISMATCH',
+      `Environment changed since token issuance: token=${token.environment_fingerprint} current=${currentEnvFingerprint}`
     );
+    emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+    throw err;
   }
 
-  // --- Verification Step 6: ED25519 signature ---
-  // Reconstruct the exact payload that was signed (everything except sig + public_key_hex)
+  // --- Step 7: ED25519 signature ---
   const { issuer_signature, public_key_hex, ...payloadWithoutSig } = token;
   const canonicalPayload = canonicalStringify(payloadWithoutSig);
   const publicKeyBuffer = Buffer.from(public_key_hex, 'hex');
-  const publicKeyObj = createPublicKey({ key: publicKeyBuffer, format: 'der', type: 'spki' });
-  // Node.js Ed25519 verify: algorithm is null (key type implies algorithm)
-  const signatureValid = cryptoVerify(
-    null,
-    Buffer.from(canonicalPayload, 'utf8'),
-    publicKeyObj,
-    Buffer.from(issuer_signature, 'hex')
-  );
-  if (!signatureValid) {
-    throw new Error(
-      `[KERNEL] Signature verification failed. Token may have been tampered with. SPAWN BLOCKED.`
+  let signatureValid = false;
+  try {
+    const publicKeyObj = createPublicKey({ key: publicKeyBuffer, format: 'der', type: 'spki' });
+    signatureValid = cryptoVerify(
+      null,
+      Buffer.from(canonicalPayload, 'utf8'),
+      publicKeyObj,
+      Buffer.from(issuer_signature, 'hex')
     );
+  } catch {
+    signatureValid = false;
+  }
+  if (!signatureValid) {
+    const err = new ExecutionDeniedError(
+      'SIGNATURE_INVALID',
+      'ED25519 signature verification failed — token may have been tampered'
+    );
+    emitAuditLog({ ...auditBase, reason: err.message, executed: false, error_type: err.error_type });
+    throw err;
   }
 
-  // --- All verifications passed ---
-  // Mark token used BEFORE spawn (prevents replay even if process hangs)
+  // --- All 7 steps passed ---
+  // Mark token used BEFORE spawn (replay blocked even on hang)
   markTokenUsed(token.token_id, {
     audit_ref: token.audit_ref,
     proposal_hash: token.proposal_hash,
+    policy_hash: token.policy_hash,
     env_fingerprint: token.environment_fingerprint,
     command,
     args,
     scope: token.scope,
+    gate_mode: token.gate_mode,
     guard_version: token.guard_version
   });
 
-  console.log(`[KERNEL] Token verified. token_id=${token.token_id} audit_ref=${token.audit_ref}`);
-  console.log(`[KERNEL] Spawning: ${command} ${args.join(' ')}`);
+  emitAuditLog({
+    ...auditBase,
+    reason: `policy_match: ${token.scope.constraints.policy_version}`,
+    executed: true
+  });
 
   // THE ONLY spawn() call in this codebase.
   const exitCode = await new Promise<number>((resolve, reject) => {
@@ -148,6 +228,7 @@ export async function executeWithAuthority(
   return {
     exit_code: exitCode,
     token_id: token.token_id,
-    audit_ref: token.audit_ref
+    audit_ref: token.audit_ref,
+    executed: true
   };
 }
