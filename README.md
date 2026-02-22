@@ -1,5 +1,15 @@
 # Execution Guard Action
 
+## AEBS Reference Implementation
+
+**Conformance Level:** Level 1 (Structural)
+
+This repository demonstrates structural enforcement of:
+- Default-deny execution model
+- STOP/HOLD/ALLOW state machine
+- Runtime blocking capability
+- Pre-execution decision boundary
+
 > **REFERENCE IMPLEMENTATION DECLARATION** — **Production Kernel Not Included**
 >
 > This repository is a **Reference Implementation** of the Execution Contract pattern.
