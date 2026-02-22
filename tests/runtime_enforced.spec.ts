@@ -15,8 +15,7 @@
  *   T7: PERMISSIVE mode, rule miss → HOLD token issued, kernel blocks (DECISION_NOT_ALLOW)
  *
  * Note: Environment fingerprint mismatch tests (runner identity binding,
- * cross-workflow replay, cross-commit replay) are in the production kernel:
- * echo-execution-kernel (private) — tests/runtime_enforced.spec.ts T8–T10.
+ * cross-workflow replay, cross-commit replay) are in the production kernel.
  */
 
 import { test } from 'node:test';
